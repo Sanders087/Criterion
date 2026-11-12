@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1793378301616,
+      "tag": "0000_wild_adam_destine",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1794175119413,
+      "tag": "0001_sharp_james_howlett",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1794175707726,
+      "tag": "0002_magical_eddie_brock",
+      "breakpoints": true
+    }
+  ]
+}
