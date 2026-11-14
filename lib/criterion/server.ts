@@ -7,12 +7,13 @@ import { EMPTY_MATERIALS, type Contract, type Materials } from './domain';
 import { CRITERION_TEMPLATE } from './templates';
 import { LAWYER_PROMPT } from './legal-defaults';
 import type { AIEnv } from './ai';
+import {PaymentError,type TBankEnv} from './tbank';
 export class HttpError extends Error{constructor(public status:number,message:string){super(message)}}
-export const runtime=()=>env as Cloudflare.Env & AIEnv;
+export const runtime=()=>env as Cloudflare.Env & AIEnv & TBankEnv;
 export async function identity(){const user=await getAccount();if(!user)throw new HttpError(401,'Войдите, чтобы сохранять документы и продолжать работу с любого устройства.');return user}
 export function json(data:unknown,status=200){return Response.json(data,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}})}
 export function failure(error:unknown){
- if(error instanceof HttpError)return json({error:error.message},error.status);
+ if(error instanceof HttpError||error instanceof PaymentError)return json({error:error.message},error.status);
  if(error instanceof Error&&error.name==='ZodError')return json({error:'Проверьте формат данных и длину текста. Изменения не сохранены.'},400);
  if(error instanceof Error&&['TimeoutError','AbortError'].includes(error.name))return json({error:'ИИ не ответил вовремя. Предыдущая версия сохранена; повторите запрос.'},504);
  console.error('Criterion request failed',error instanceof Error?error.name:'unknown');

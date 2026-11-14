@@ -1,3 +1,4 @@
+import {fileURLToPath} from 'node:url';
 import {createRequire} from 'node:module';
 import {readFile,readdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
@@ -5,7 +6,7 @@ import {createHash} from 'node:crypto';
 const testTokens={'qa-owner':'a'.repeat(64),'other-user':'b'.repeat(64)};
 const authHeaders=owner=>owner?{cookie:'__Host-criterion_session='+testTokens[owner]}:{};
 const require=createRequire(import.meta.url);const wranglerRequire=createRequire(require.resolve('wrangler/package.json'));const {Miniflare}=wranglerRequire('miniflare');
-const root=new URL('../dist/server/',import.meta.url).pathname;const files=(await readdir(root,{recursive:true})).filter(f=>/\.m?js$/.test(f));const modulePaths=['index.js',...files.filter(f=>f!=='index.js')];
+const root=fileURLToPath(new URL('../dist/server/',import.meta.url));const files=(await readdir(root,{recursive:true})).filter(f=>/\.m?js$/.test(f));const modulePaths=['index.js',...files.filter(f=>f!=='index.js')];
 const mf=new Miniflare({modules:modulePaths.map(path=>({type:'ESModule',path:root+path})),modulesRoot:root,compatibilityDate:'2026-05-15',compatibilityFlags:['nodejs_compat'],d1Databases:{DB:'criterion-isolated-integration'},cf:false});
 let checks=0;let created;
 async function request(path,method='GET',body,owner='qa-owner',expected=200,extraHeaders={}){
@@ -23,6 +24,8 @@ try{
  await request('/api/documents','POST',{kind:'lease',mode:'ai'},'qa-owner',503);
  let d=await request('/api/documents','POST',{kind:'lease',mode:'form',title:'Интеграционный тест аренды'},'qa-owner',201);created=d.id;const path='/api/documents/'+d.id;
  await request(path,'GET',undefined,'other-user',404);
+ // Existing documents retain their pre-billing access. Paid flows have a separate integration suite.
+ await db.prepare("UPDATE documents SET billing_state='legacy' WHERE id=?").bind(d.id).run();
  d=await request(path,'PATCH',{action:'save',revision:d.revision,facts:{partyA:'Тестовый арендодатель',partyB:'Тестовый арендатор',subject:'Офис № 7',price:'50 000 рублей в месяц',payment:'Первого числа каждого месяца',term:'12 месяцев',acceptance:'По акту передачи ключей'}});
  const saved=await request(path);assert.equal(saved.facts.subject,'Офис № 7');checks++;
  await request(path,'PATCH',{action:'save',revision:0,facts:{}},'qa-owner',409);

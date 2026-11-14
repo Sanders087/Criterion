@@ -29,5 +29,8 @@ export function docx(doc:Contract):Uint8Array{
  'word/document.xml':`<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="${ns}"><w:body>${table}<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="20" w:lineRule="exact"/></w:pPr></w:p><w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="2160" w:right="850" w:bottom="1140" w:left="1701"/></w:sectPr></w:body></w:document>`});
 }
 export function download(doc:Contract,format:'docx'|'txt'){
- const data=format==='docx'?docx(doc):documentText(doc);const blob=new Blob([data as BlobPart],{type:format==='docx'?'application/vnd.openxmlformats-officedocument.wordprocessingml.document':'text/plain;charset=utf-8'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`${doc.title.replace(/[<>:"/\\|?*\x00-\x1f]/g,'_')}.${format}`;a.style.display='none';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),5000);
+ const data=format==='docx'?docx(doc):documentText(doc);const blob=new Blob([data as BlobPart],{type:format==='docx'?'application/vnd.openxmlformats-officedocument.wordprocessingml.document':'text/plain;charset=utf-8'});downloadBlob(blob,`${doc.title}.${format}`);
+}
+export function downloadBlob(blob:Blob,filename:string){
+ const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=filename.replace(/[<>:"/\\|?*\x00-\x1f]/g,'_');a.style.display='none';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),5000);
 }

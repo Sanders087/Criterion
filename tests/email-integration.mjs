@@ -1,9 +1,10 @@
+import {fileURLToPath} from 'node:url';
 import {createRequire} from 'node:module';
 import {readFile,readdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 const require=createRequire(import.meta.url),wr=createRequire(require.resolve('wrangler/package.json')),{Miniflare,createFetchMock}=wr('miniflare');
-const root=new URL('../dist/server/',import.meta.url).pathname,files=(await readdir(root,{recursive:true})).filter(f=>/\.m?js$/.test(f));
+const root=fileURLToPath(new URL('../dist/server/',import.meta.url)),files=(await readdir(root,{recursive:true})).filter(f=>/\.m?js$/.test(f));
 const fetchMock=createFetchMock();fetchMock.disableNetConnect();const sent=[];let failMail=false;
 fetchMock.get('https://api.resend.com').intercept({path:'/emails',method:'POST'}).reply(200,async options=>{if(failMail)return '{}';sent.push(await new Response(options.body).json());return JSON.stringify({id:'mock-message-id'})}).persist();
 const mf=new Miniflare({modules:['index.js',...files.filter(f=>f!=='index.js')].map(path=>({type:'ESModule',path:root+path})),modulesRoot:root,compatibilityDate:'2026-05-15',compatibilityFlags:['nodejs_compat'],d1Databases:{DB:'mail-isolated'},bindings:{RESEND_API_KEY:'test-key-not-real',EMAIL_FROM:'Criterion <test@example.com>',AUTH_PUBLIC_URL:'https://criterion.test'},fetchMock,cf:false});

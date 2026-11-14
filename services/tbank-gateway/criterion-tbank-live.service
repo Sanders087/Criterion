@@ -1,0 +1,29 @@
+[Unit]
+Description=Criterion live T-Bank transport
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=criterion-tbank-live
+Group=criterion-tbank-live
+EnvironmentFile=/etc/criterion-tbank-live/gateway.env
+ExecStart=/opt/criterion-tbank/runtime/bin/node /opt/criterion-tbank-live/server.mjs
+WorkingDirectory=/opt/criterion-tbank-live
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LimitNOFILE=1024
+MemoryMax=192M
+CPUQuota=50%
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

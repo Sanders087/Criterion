@@ -1,8 +1,9 @@
+import {fileURLToPath} from 'node:url';
 import {createRequire} from 'node:module';
 import {readFile,readdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 const require=createRequire(import.meta.url),wr=createRequire(require.resolve('wrangler/package.json')),{Miniflare}=wr('miniflare');
-const root=new URL('../dist/server/',import.meta.url).pathname,files=(await readdir(root,{recursive:true})).filter(f=>/\.m?js$/.test(f));
+const root=fileURLToPath(new URL('../dist/server/',import.meta.url)),files=(await readdir(root,{recursive:true})).filter(f=>/\.m?js$/.test(f));
 const mf=new Miniflare({modules:['index.js',...files.filter(f=>f!=='index.js')].map(path=>({type:'ESModule',path:root+path})),modulesRoot:root,compatibilityDate:'2026-05-15',compatibilityFlags:['nodejs_compat'],d1Databases:{DB:'auth-isolated'},cf:false});
 let count=0;
 async function req(path,body,cookie='',status=200,headers={}){const r=await mf.dispatchFetch('https://criterion.test'+path,{method:body?'POST':'GET',headers:{Origin:'https://criterion.test',...(body?{'content-type':'application/json'}:{}),...(cookie?{cookie}:{}),...headers},body:body?JSON.stringify(body):undefined});const d=await r.json();assert.equal(r.status,status,JSON.stringify(d));count++;return {data:d,cookie:r.headers.get('set-cookie')?.split(';')[0],headers:r.headers};}
