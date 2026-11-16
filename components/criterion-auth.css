@@ -1,0 +1,11 @@
+.auth-password { position: relative; }
+.auth-card .auth-password input { padding-right: 52px; }
+.auth-password-toggle { position: absolute; right: 3px; top: 50%; transform: translateY(-50%); width: 44px; height: 40px; display: grid; place-items: center; border-radius: 6px; color: var(--muted, #a6b8ce); }
+.auth-password-toggle:hover { color: var(--accent-light, #b9d9ff); background: #6fb6ff14; }
+.criterion-auth-dialog { padding: 0; border: 1px solid #6fb6ff38; border-radius: 18px; color: var(--ink, #e8eff8); background: #101b2b; width: min(460px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow-y: auto; margin: auto; box-shadow: 0 24px 100px #0008; }
+.criterion-auth-dialog::backdrop { background: #020713c4; backdrop-filter: blur(8px); }
+.auth-embedded .auth-card { position: relative; border: 0; width: 100%; max-width: none; box-shadow: none; padding-top: 40px; }
+.auth-embedded .auth-dialog-close { position: absolute; right: 12px; top: 10px; width: 36px; height: 36px; }
+.auth-tabs [role=tab]:focus-visible, .auth-password-toggle:focus-visible, .auth-dialog-close:focus-visible { outline: 2px solid var(--accent, #6fb6ff); outline-offset: 2px; }
+.auth-embedded .recovery-code { color: #d8eaff; background: #091321; }
+@media (max-width: 500px) { .auth-embedded .auth-card { padding: 36px 22px 24px; } }

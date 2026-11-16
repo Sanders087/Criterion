@@ -1,0 +1,56 @@
+/* Local review of Criterion 1.12. */
+.contract-progress .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.contract-progress { list-style: none; margin: 14px 0 20px; padding: 0; }
+.contract-progress li { position: relative; display: flex; gap: 11px; align-items: flex-start; padding: 0 0 21px; color: var(--dim); font-size: 11px; line-height: 24px; cursor: default; }
+.contract-progress li:not(:last-child)::after { content: ''; position: absolute; top: 27px; bottom: 3px; left: 11px; width: 1px; background: var(--line); }
+.contract-progress li:last-child { padding-bottom: 0; }
+.progress-marker { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; flex: 0 0 24px; border: 1px solid var(--line); border-radius: 50%; font-size: 9px; }
+.contract-progress .is-current { color: var(--accent-light); }
+.contract-progress .is-current .progress-marker { background: #6fb6ff16; border-color: var(--accent); box-shadow: 0 0 0 3px #6fb6ff08; }
+.contract-progress .is-complete .progress-marker { color: #9cd8ca; border-color: #9cd8ca40; }
+.contract-progress small { display: block; margin-top: 1px; font-size: 9px; line-height: 1.5; color: var(--muted); }
+.account-signin { width: 100%; padding: 12px 10px; font-size: 11px; justify-content: center; gap: 8px; }
+.account-signin > svg { flex-shrink: 0; }
+.account-entry { display: flex; align-items: center; width: 100%; min-width: 0; gap: 10px; text-align: left; border-radius: 8px; padding: 5px 0; }
+.account-entry > span { min-width: 0; flex: 1; }
+.account-entry strong { display: block; font-size: 11px; color: var(--ink); }
+.account-entry small { display: block; overflow: hidden; text-overflow: ellipsis; font-size: 9px; color: var(--muted); }
+.account-entry > svg { color: var(--accent); flex-shrink: 0; }
+.topbar-signin { padding: 8px 12px; min-height: 36px; font-size: 11px; margin-right: 12px; }
+.criterion-benefits { margin: 32px 0; padding: 27px 0 30px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.benefits-heading h2 { margin: 9px 0; font: 400 26px/1.25 var(--display); color: var(--ink); letter-spacing: -.025em; }
+.benefits-heading > p { color: var(--muted); font-size: 12px; line-height: 1.75; max-width: 620px; }
+.benefits-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 26px; margin-top: 25px; }
+.benefits-grid article { padding-right: 12px; }
+.benefits-grid article + article { padding-left: 24px; border-left: 1px solid var(--line); }
+.benefits-grid svg { color: var(--accent); margin-bottom: 10px; }
+.benefits-grid h3 { font-size: 13px; font-weight: 500; margin-bottom: 8px; color: var(--ink); }
+.benefits-grid p { font-size: 11px; line-height: 1.85; color: var(--muted); }
+.chat-bottom { gap: 16px; flex-wrap: wrap; }
+.chat-bottom .draft-cta { flex-shrink: 0; margin-left: auto; }
+.draft-cta { border: 2px solid #6fb6ff35; border-radius: 9px; background: #142339; color: var(--accent-light); padding: 12px 17px; min-height: 46px; }
+.draft-cta:hover:not(:disabled) { background-color: #1b304c; }
+.chat-bottom.interview-ready { margin-top: 18px; padding: 16px; border-radius: 10px; background: #6fb6ff08; border: 1px solid #6fb6ff25; }
+.chat-bottom.interview-ready > span { display: flex; align-items: flex-start; gap: 9px; color: var(--accent-light); flex: 1 1 230px; }
+.chat-bottom.interview-ready > span > svg { flex-shrink: 0; margin-top: 2px; }
+.interview-ready strong { display: block; font-size: 11px; font-weight: 500; line-height: 1.7; }
+.interview-ready small { display: block; font-size: 10px; line-height: 1.7; color: var(--muted); margin-top: 3px; }
+@property --draft-border-angle { syntax: '<angle>'; initial-value: 0deg; inherits: false; }
+.draft-cta.draft-cta-ready { border-color: transparent; background: linear-gradient(#142339, #142339) padding-box, conic-gradient(from var(--draft-border-angle), #6fb6ff40 0deg, #6fb6ff40 220deg, #6fb6ff 280deg, #e0f3ff 315deg, #6fb6ff40 360deg) border-box; box-shadow: 0 0 18px #6fb6ff16; animation: draft-border-orbit 3s linear infinite; }
+.draft-cta.draft-cta-ready:hover { box-shadow: 0 0 22px #6fb6ff32; }
+@keyframes draft-border-orbit { to { --draft-border-angle: 360deg; } }
+@media (max-width: 1050px) { .topbar-signin { margin-right: 0; } .topbar:has(.topbar-signin) .top-date, .topbar:has(.topbar-signin) .top-divider { display: none; } }
+@media (max-width: 700px) {
+  .topbar:has(.topbar-signin) .breadcrumbs { display: none; }
+  .topbar-signin { font-size: 11px; min-height: 40px; padding: 8px 10px; }
+  .criterion-benefits { margin: 25px 0; padding: 23px 0; }
+  .benefits-heading h2 { font-size: 24px; }
+  .benefits-grid { grid-template-columns: 1fr; gap: 18px; margin-top: 22px; }
+  .benefits-grid article, .benefits-grid article + article { border: 0; padding: 0 0 0 34px; position: relative; }
+  .benefits-grid svg { position: absolute; top: 1px; left: 0; }
+  .benefits-grid p { font-size: 12px; }
+  .chat-bottom .draft-cta { width: 100%; justify-content: center; margin: 0; }
+  .chat-bottom.interview-ready > span { flex: none; }
+  .interview-ready strong { font-size: 12px; }
+}
+@media (prefers-reduced-motion: reduce) { .draft-cta.draft-cta-ready { animation: none; border-color: var(--accent); background: #142339; } }

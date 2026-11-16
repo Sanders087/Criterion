@@ -1,3 +1,4 @@
+import {demoFacts,demoSections,DEMO_NOTICE} from './demo.ts';
 export function uid(){ if(typeof crypto.randomUUID==='function')return crypto.randomUUID();const b=crypto.getRandomValues(new Uint8Array(16));b[6]=(b[6]&15)|64;b[8]=(b[8]&63)|128;const h=Array.from(b,n=>n.toString(16).padStart(2,'0')).join('');return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`; }
 export const KINDS = [
   {id:'services',name:'Оказание услуг',short:'Услуги',description:'Консалтинг, дизайн, маркетинг и другие услуги',icon:'briefcase'},
@@ -13,7 +14,7 @@ export type Message = {id:string;role:'assistant'|'user';text:string;at:string};
 export type Section = {id:string;title:string;content:string};
 export type Issue = {id:string;severity:'high'|'medium'|'info';title:string;detail:string;sectionId?:string;source?:string};
 export type Version = {number:number;at:string;label:string;sections:Section[];issues:Issue[]};
-export type Contract = {id:string;title:string;kind:Kind;stage:'interview'|'ready'|'review'|'final';mode:'form'|'ai';revision:number;createdAt:string;updatedAt:string;facts:Facts;context:string;messages:Message[];sections:Section[];issues:Issue[];versions:Version[];materialsSnapshot?:Materials;engine?:'template'|'ai';reviewedAt?:string};
+export type Contract = {id:string;title:string;kind:Kind;stage:'interview'|'ready'|'review'|'final';mode:'form'|'ai';revision:number;createdAt:string;updatedAt:string;facts:Facts;context:string;messages:Message[];sections:Section[];issues:Issue[];versions:Version[];materialsSnapshot?:Materials;engine?:'template'|'ai';reviewedAt?:string;billing?:import('./billing').Billing};
 export type Materials = {prompt:string;template:string;sources:string;updatedAt?:string};
 export const EMPTY_MATERIALS:Materials={prompt:'',template:'',sources:''};
 export const SECTIONS = [
@@ -76,6 +77,7 @@ export function review(doc:Contract):Issue[]{
   if(missing.length)issues.push({id:`missing-${s.id}`,severity:['parties','subject','payment','term'].includes(s.id)?'high':'medium',title:`Уточнить: ${s.title.toLowerCase()}`,detail:missing.join('; '),sectionId:s.id});
   if(!s.content.trim())issues.push({id:`empty-${s.id}`,severity:'high',title:`Пустой раздел: ${s.title}`,detail:'Раздел нужно заполнить или осознанно исключить в редакторе.',sectionId:s.id});
  }
+ if(doc.id==='example')return [...issues,{id:'demo-notice',severity:'info',title:'Пример с вымышленными данными',detail:DEMO_NOTICE}];
  if(doc.engine==='template')issues.push({id:'template',severity:'info',title:'Собран по базовой структуре',detail:'Это структурированный черновик. Свободный контекст не интерпретирован автоматически; проверьте его при редактировании. Юридическая оценка и поиск противоречий требуют ИИ и проверки специалистом.'});
  if(!doc.materialsSnapshot?.sources)issues.push({id:'sources',severity:'info',title:'Правовой пакет не подключён',detail:'Проверка актуальности законодательства не выполнялась. Загрузите проверенные источники в «Материалы».'});
  if(doc.context.trim() && doc.engine==='template')issues.push({id:'context',severity:'medium',title:'Есть дополнительные пожелания',detail:doc.context});
@@ -86,7 +88,10 @@ export function snapshot(doc:Contract,label:string){
 }
 export function documentText(doc:Contract){return `${doc.title}\n\n${doc.sections.map(s=>`${s.id==='parties'?'':s.title+'\n\n'}${s.content}`).join('\n\n')}\n`}
 export function demoContract():Contract{
- const doc=makeContract('services','form','Разработка фирменного стиля');doc.id='example';
- doc.facts={partyA:'ИП Анна Смирнова',partyB:'ООО «Север»',subject:'Разработка логотипа, цветовой палитры и руководства по использованию фирменного стиля. Два варианта концепции и два раунда правок.',price:'80 000 рублей',payment:'40 000 рублей авансом до начала работ; 40 000 рублей в течение 5 рабочих дней после подписания акта оказанных услуг. Перечисление на расчётный счёт Исполнителя.',term:'С 1 ноября по 30 ноября 2026 года',acceptance:'Исполнитель направляет результаты и акт по электронной почте. Заказчик в течение 5 рабочих дней подписывает акт либо направляет перечень конкретных недостатков.',liability:'За просрочку оплаты — 0,1% от просроченной суммы за каждый день просрочки, но не более 10% этой суммы.',city:'Москва',date:'01.11.2026'};
- doc.engine='template';doc.stage='review';doc.reviewedAt=new Date().toISOString();doc.sections=draftTemplate(doc);doc.issues=review(doc);doc.versions=[snapshot(doc,'Первый черновик')];return doc;
+ const doc=makeContract('services','form','Договор разработки фирменного стиля · пример');doc.id='example';
+ doc.facts={...demoFacts};doc.context=DEMO_NOTICE;doc.messages=[];
+ doc.engine='template';doc.stage='review';doc.reviewedAt=new Date().toISOString();
+ doc.sections=structuredClone(demoSections);
+ doc.issues=[{id:'demo-notice',severity:'info',title:'Пример с вымышленными данными',detail:DEMO_NOTICE},{id:'demo-scope',severity:'info',title:'Что показывает пример',detail:'Этапы, расчёты, приёмка, правки, передача прав и реквизиты согласованы внутри одной вымышленной сделки. Это демонстрация оформления, а не результат юридической проверки вашей ситуации.'}];
+ doc.versions=[snapshot(doc,'Демонстрационный договор')];return doc;
 }

@@ -1,0 +1,14 @@
+.legal-expertise { display: grid; grid-template-columns: 1.15fr 1fr; gap: 36px; margin-top: 32px; padding: 30px; border: 1px solid #6fb6ff30; border-radius: 12px; background: linear-gradient(120deg, #142339, #101b2b); }
+.expertise-copy h2 { margin: 12px 0 15px; font: 400 28px/1.25 var(--display); color: var(--ink); letter-spacing: -.025em; }
+.expertise-copy p { color: var(--muted); font-size: 12px; line-height: 1.85; }
+.expertise-link { display: inline-flex; align-items: center; gap: 8px; margin-top: 20px; color: var(--accent-light); font-size: 12px; line-height: 1.6; text-decoration: underline; text-underline-offset: 4px; }
+.expertise-link svg { flex-shrink: 0; }
+.expertise-link:hover { color: var(--ink); }
+.expertise-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 5px; }
+.expertise-credentials { border-left: 1px solid var(--line); padding-left: 30px; }
+.expertise-credentials h3 { margin: 0 0 5px; font-size: 17px; font-weight: 500; color: var(--ink); }
+.expertise-credentials > p { color: var(--muted); font-size: 11px; line-height: 1.6; }
+.expertise-credentials dl { margin: 20px 0 0; display: grid; gap: 16px; }
+.expertise-credentials dt { font-size: 12px; color: var(--accent-light); }
+.expertise-credentials dd { margin: 4px 0 0; font-size: 11px; line-height: 1.7; color: var(--muted); }
+@media (max-width: 700px) { .legal-expertise { grid-template-columns: 1fr; gap: 24px; padding: 22px; margin-top: 24px; } .expertise-copy h2 { font-size: 25px; } .expertise-credentials { border-left: 0; border-top: 1px solid var(--line); padding: 22px 0 0; } .expertise-credentials dd { font-size: 12px; } }

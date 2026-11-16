@@ -1,9 +1,10 @@
+import {fileURLToPath} from 'node:url';
 import {createRequire} from 'node:module';
 import {readFile,readdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 const require=createRequire(import.meta.url),wr=createRequire(require.resolve('wrangler/package.json')),{Miniflare,createFetchMock}=wr('miniflare');
-const root=new URL('../dist/server/',import.meta.url).pathname,files=(await readdir(root,{recursive:true})).filter(f=>/\.m?js$/.test(f));
+const root=fileURLToPath(new URL('../dist/server/',import.meta.url)),files=(await readdir(root,{recursive:true})).filter(f=>/\.m?js$/.test(f));
 const fetchMock=createFetchMock();fetchMock.disableNetConnect();const sent=[];let failMail=false;
 fetchMock.get('https://api.resend.com').intercept({path:'/emails',method:'POST'}).reply(200,async options=>{if(failMail)return '{}';sent.push(await new Response(options.body).json());return JSON.stringify({id:'mock-message-id'})}).persist();
 const mf=new Miniflare({modules:['index.js',...files.filter(f=>f!=='index.js')].map(path=>({type:'ESModule',path:root+path})),modulesRoot:root,compatibilityDate:'2026-05-15',compatibilityFlags:['nodejs_compat'],d1Databases:{DB:'mail-isolated'},bindings:{RESEND_API_KEY:'test-key-not-real',EMAIL_FROM:'Criterion <test@example.com>',AUTH_PUBLIC_URL:'https://criterion.test'},fetchMock,cf:false});
@@ -40,5 +41,17 @@ try{
  await req(endpoint,{action:'request-reset',email});const afterFailure=(await db.prepare('SELECT count(*) AS n FROM email_tokens WHERE claim IS NULL AND expires_at>?').bind(Date.now()).first()).n;assert.equal(afterFailure,beforeFailure);
  await req(endpoint,{action:'send-verification'},other.cookie,503);
  await req(endpoint,{action:'request-reset',email},'',429);
- console.log(`Email checks passed: ${checks}; mocked provider only. Confirmation, no account enumeration in reset responses, token hashing, expiry, single use/races, session revocation, failed send cleanup and limits.`);
+ // Invalid reset attempts still consume limits. Different links must not share
+ // one global bucket, while one link cannot evade its limit by changing IPs.
+ await db.prepare('DELETE FROM auth_limits').run();
+ for(let i=0;i<21;i++)await req(endpoint,{action:'reset',token:digest('independent-reset-'+i)},'',400,{'cf-connecting-ip':'192.0.2.'+(i+1)});
+ const repeatedToken=digest('same-reset-link');
+ for(let i=0;i<20;i++)await req(endpoint,{action:'reset',token:repeatedToken},'',400,{'cf-connecting-ip':'198.51.100.'+(i+1)});
+ await req(endpoint,{action:'reset',token:repeatedToken},'',429,{'cf-connecting-ip':'198.51.100.21'});
+ // The optional email field must not select a different consume bucket.
+ await req(endpoint,{action:'reset',token:repeatedToken,email:'unrelated@example.com'},'',429,{'cf-connecting-ip':'198.51.100.22'});
+ // Independent token buckets do not relax the existing per-IP ceiling.
+ for(let i=0;i<40;i++)await req(endpoint,{action:'reset',token:digest('one-ip-reset-'+i)},'',400,{'cf-connecting-ip':'203.0.113.1'});
+ await req(endpoint,{action:'reset',token:digest('one-ip-reset-over-limit')},'',429,{'cf-connecting-ip':'203.0.113.1'});
+ console.log(`Email checks passed: ${checks}; mocked provider only. Confirmation, no account enumeration in reset responses, token hashing, expiry, single use/races, session revocation, failed send cleanup, isolated token limits and per-IP limits.`);
 }finally{await mf.dispose()}

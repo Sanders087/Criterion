@@ -1,0 +1,35 @@
+{
+	admin off
+	auto_https disable_redirects
+	servers {
+		protocols h1 h2
+		timeouts {
+			read_header 10s
+			read_body 15s
+			idle 30s
+		}
+	}
+}
+
+https://srv678677.hstgr.cloud {
+	tls {
+		issuer acme {
+			dir https://acme-v02.api.letsencrypt.org/directory
+			disable_http_challenge
+		}
+	}
+	request_body {
+		max_size 32KB
+	}
+	handle_path /criterion-tbank/* {
+		reverse_proxy 127.0.0.1:8788 {
+			transport http {
+				dial_timeout 3s
+				response_header_timeout 15s
+			}
+		}
+	}
+	handle {
+		respond 404
+	}
+}
