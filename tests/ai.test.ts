@@ -4,8 +4,8 @@ import {interview,generate,templateSections} from '../lib/criterion/ai.ts';
 import {makeContract,SECTIONS,EMPTY_MATERIALS} from '../lib/criterion/domain.ts';
 import {resolveTemplateTitles,LEGAL_SERVICES_TEMPLATE} from '../lib/criterion/templates.ts';
 import {LAWYER_PROMPT} from '../lib/criterion/legal-defaults.ts';
-const runtime={OPENAI_API_KEY:'fixture-only-not-a-secret',OPENAI_MODEL:'fixture-model'};
-async function withFetch(fn:typeof fetch,run:()=>Promise<void>){const original=globalThis.fetch;globalThis.fetch=fn;try{await run()}finally{globalThis.fetch=original}}
+const runtime={OPENAI_API_KEY:'fixture-only-not-a-secret',OPENAI_MODEL:'fixture-model',PII_ANALYZER_URL:'https://pii.test/analyze',PII_ANALYZER_TOKEN:'fixture-only-not-a-secret-123456789'};
+async function withFetch(fn:typeof fetch,run:()=>Promise<void>){const original=globalThis.fetch;globalThis.fetch=async(url,options)=>String(url)==='https://pii.test/analyze'?Response.json({profile:'ru-contract-v1',offsetUnit:'utf16',spans:[]}):fn(url,options);try{await run()}finally{globalThis.fetch=original}}
 function completion(value:unknown,finish_reason='stop'){return Response.json({choices:[{message:{content:JSON.stringify(value)},finish_reason}]})}
 test('No API key fails explicitly without attempting an external request',async()=>{await assert.rejects(()=>interview({},makeContract('sale','ai'),EMPTY_MATERIALS),/не подключён/)});
 test('Provider authorization and rate limit failures are actionable',async()=>{for(const status of [401,429])await withFetch(async()=>new Response('',{status}),async()=>{await assert.rejects(()=>interview(runtime,makeContract('sale','ai'),EMPTY_MATERIALS),status===401?/ключ/:/Лимит/)})});

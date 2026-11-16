@@ -8,6 +8,11 @@ const root=fileURLToPath(new URL('../dist/server/',import.meta.url)),files=(awai
 const fetchMock=createFetchMock();fetchMock.disableNetConnect();
 const terminal='fixtureDEMO',password='fixture-not-real',cookie='__Host-criterion_session='+'a'.repeat(64),owner='payment-user';
 const receiptEmails=[];const bankPayments=new Map();let initCount=0,checks=0,failAI=false,failInit=false,lostInit=false,unreceivedInit=false,failCheckOrder=false;
+let failDetector=false,modelCalls=0;
+const piiToken='fixture-pii-token-with-at-least-32-characters';
+fetchMock.get('https://pii.test').intercept({path:'/analyze',method:'POST',headers:{authorization:'Bearer '+piiToken}}).reply(200,()=>{
+  return JSON.stringify(failDetector?{error:'fixture failure'}:{profile:'ru-contract-v1',offsetUnit:'utf16',spans:[]});
+}).persist();
 const token=data=>createHash('sha256').update(Object.entries({...data,Password:password}).filter(([key,val])=>key!=='Token'&&val!==null&&['string','number','boolean'].includes(typeof val)).sort(([a],[b])=>a.localeCompare(b,'en')).map(([,val])=>String(val)).join('')).digest('hex');
 for(const method of ['Init','GetState','CheckOrder','Cancel'])fetchMock.get('https://securepay.tinkoff.ru').intercept({path:'/v2/'+method,method:'POST'}).reply(200,async options=>{
   const data=await new Response(options.body).json();try{assert.equal(data.Token,token(data));assert.equal(data.TerminalKey,terminal)}catch(e){console.error('Mock bank request validation failed:',e);throw e}
@@ -23,12 +28,13 @@ for(const method of ['Init','GetState','CheckOrder','Cancel'])fetchMock.get('htt
   return JSON.stringify(bankPayments.get(data.PaymentId)||{Success:false,ErrorCode:'7'});
 }).persist();
 fetchMock.get('https://api.openai.com').intercept({path:'/v1/chat/completions',method:'POST'}).reply(200,async options=>{
+  modelCalls++;
   if(failAI)return JSON.stringify({error:'fixture failure'});
   const request=await new Response(options.body).json(),input=JSON.parse(request.messages[1].content);
   const value=request.messages[0].content.includes('Режим интервью')?{reply:'Какой срок согласован?',facts:{subject:'Тестовая услуга'},ready:true}:input.expectedSections?{sections:input.expectedSections.map(s=>({...s,content:'PRIVATE-GENERATED-'+s.id})),issues:[{id:'private',severity:'info',title:'Review',detail:'PRIVATE-REVIEW'}]}:{issues:[{id:'check',severity:'info',title:'Проверено',detail:'PRIVATE-REVIEW'}]};
   return JSON.stringify({choices:[{message:{content:JSON.stringify(value)},finish_reason:'stop'}]});
 }).persist();
-const mf=new Miniflare({modules:['index.js',...files.filter(f=>f!=='index.js')].map(path=>({type:'ESModule',path:root+path})),modulesRoot:root,compatibilityDate:'2026-05-15',compatibilityFlags:['nodejs_compat'],d1Databases:{DB:'payments-isolated'},bindings:{OPENAI_API_KEY:'fixture-only',TBANK_ENABLED:'true',TBANK_TERMINAL_KEY:terminal,TBANK_PASSWORD:password,TBANK_PUBLIC_URL:'https://criterion.test',TBANK_RECEIPT_MODE:'bank',TBANK_TAXATION:'usn_income',TBANK_TAX:'none',TBANK_PAYMENT_METHOD:'full_payment',TBANK_PAYMENT_OBJECT:'intellectual_activity'},fetchMock,cf:false});
+const mf=new Miniflare({modules:['index.js',...files.filter(f=>f!=='index.js')].map(path=>({type:'ESModule',path:root+path})),modulesRoot:root,compatibilityDate:'2026-05-15',compatibilityFlags:['nodejs_compat'],d1Databases:{DB:'payments-isolated'},bindings:{PII_ANALYZER_URL:'https://pii.test/analyze',PII_ANALYZER_TOKEN:piiToken,OPENAI_API_KEY:'fixture-only',TBANK_ENABLED:'true',TBANK_TERMINAL_KEY:terminal,TBANK_PASSWORD:password,TBANK_PUBLIC_URL:'https://criterion.test',TBANK_RECEIPT_MODE:'bank',TBANK_TAXATION:'usn_income',TBANK_TAX:'none',TBANK_PAYMENT_METHOD:'full_payment',TBANK_PAYMENT_OBJECT:'intellectual_activity'},fetchMock,cf:false});
 async function request(path,method='GET',body,status=200,headers={}){
   const response=await mf.dispatchFetch('https://criterion.test'+path,{method,headers:{cookie,Origin:'https://criterion.test',...(body?{'content-type':'application/json'}:{}),...headers},body:body?JSON.stringify(body):undefined});
   const data=await response.json();assert.equal(response.status,status,JSON.stringify(data));checks++;return data;
@@ -62,6 +68,14 @@ try{
   payment.Status='CONFIRMED';await notification(payment,{Amount:'19900'});await notification(payment);await notification(payment,{Status:'AUTHORIZED'});
   doc=await request(path);assert.equal(doc.billing.locked,false);assert.equal(doc.billing.aiRemaining,2);assert.match(JSON.stringify(doc),/PRIVATE-GENERATED/);
   assert.equal((await db.prepare("SELECT COUNT(*) count FROM payment_events WHERE order_id=? AND status='CONFIRMED'").bind(payment.OrderId).first()).count,1);
+  // A detector failure must not spend a paid operation or save a partial document.
+  const beforePrivacy=await db.prepare('SELECT body,revision,ai_operations_used FROM documents WHERE id=?').bind(doc.id).first();
+  const callsBeforePrivacy=modelCalls;failDetector=true;
+  await request(path,'PATCH',{action:'revise',revision:doc.revision,text:'Уточните срок'},500);failDetector=false;
+  assert.equal(modelCalls,callsBeforePrivacy);
+  assert.deepEqual(await db.prepare('SELECT body,revision,ai_operations_used FROM documents WHERE id=?').bind(doc.id).first(),beforePrivacy);
+  const unlocked=await db.prepare('SELECT lock_token,lock_until FROM documents WHERE id=?').bind(doc.id).first();
+  assert.equal(unlocked.lock_token,null);assert.equal(unlocked.lock_until,null);checks++;
   failAI=true;await request(path,'PATCH',{action:'revise',revision:doc.revision,text:'Уточните срок'},500);failAI=false;doc=await request(path);assert.equal(doc.billing.aiRemaining,2);
   doc=await request(path,'PATCH',{action:'revise',revision:doc.revision,text:'Уточните срок'});assert.equal(doc.billing.aiRemaining,1);
   const rev=doc.revision;const race=await Promise.all([0,1].map(()=>mf.dispatchFetch('https://criterion.test'+path,{method:'PATCH',headers:{cookie,'content-type':'application/json'},body:JSON.stringify({action:'review',revision:rev})})));assert.deepEqual(race.map(r=>r.status).sort(),[200,409]);checks++;

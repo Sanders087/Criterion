@@ -1,0 +1,10 @@
+# Copy to repository root AFTER the team provides the combined Dockerfile.
+meta:
+  environment: docker
+  toolchain:
+    name: docker
+build:
+  dockerfile: Dockerfile
+run:
+  containerPort: 3000
+  servicePort: 80

@@ -1,0 +1,16 @@
+# Allowlist: credentials, Git history, site data and node_modules never enter context.
+**
+!services/
+!services/pii/
+!services/pii/__init__.py
+!services/pii/app.py
+!services/pii/detector.py
+!services/pii/healthcheck.py
+!services/pii/requirements.lock.txt
+!services/pii/test_pii.py
+!services/pii/benchmark.py
+!scripts/
+!scripts/check-pii-endpoint.py
+!tests/
+!tests/fixtures/
+!tests/fixtures/pii-corpus.jsonl
