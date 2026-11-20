@@ -17,7 +17,6 @@ class NoRedirect(HTTPRedirectHandler):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", required=True)
-    parser.add_argument("--warmup", action="store_true", help="Warm Cloudflare container via authenticated GET /ready first")
     args = parser.parse_args()
     url = urlsplit(args.url)
     if (url.scheme != "https" and not (url.scheme == "http" and url.hostname in {"127.0.0.1", "localhost", "::1"})) or url.path != "/analyze" or url.username or url.password or url.query or url.fragment:
@@ -45,12 +44,6 @@ def main():
     status, _ = send(False)
     if status != 401:
         raise ValueError(f"Expected 401 without token; got {status}.")
-    if args.warmup:
-        warmup = Request(args.url.removesuffix("/analyze") + "/ready", headers={"Authorization": "Bearer " + token})
-        with opener.open(warmup, timeout=65) as response:
-            if response.status != 200:
-                raise ValueError("Container warmup failed.")
-            response.read(1000)
     started = time.monotonic()
     status, content = send(True)
     if status != 200 or len(content) > 2_000_000:

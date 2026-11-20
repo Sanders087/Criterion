@@ -1,4 +1,4 @@
-import {env} from 'cloudflare:workers';
+import {env} from '../runtime';
 import {headers} from 'next/headers';
 export const COOKIE='__Host-criterion_session';
 const encoder=new TextEncoder();

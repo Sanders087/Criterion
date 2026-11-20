@@ -1,4 +1,4 @@
-import {env} from 'cloudflare:workers';
+import {env} from '../runtime';
 import {and,eq} from 'drizzle-orm';
 import {getDb} from '../../db';
 import {documents} from '../../db/schema';

@@ -1,7 +1,7 @@
-import type { NextConfig } from "next";
-
-const nextConfig: NextConfig = {
-  /* config options here */
+import type { NextConfig } from 'next';
+const config: NextConfig = {
+  output: 'standalone',
+  poweredByHeader: false,
+  experimental: { cpus: 2 },
 };
-
-export default nextConfig;
+export default config;

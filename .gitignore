@@ -49,3 +49,9 @@ yarn-error.log*
 /.venv/
 __pycache__/
 *.py[cod]
+
+# Persistent SQLite data belongs in the deployment volume, never in git.
+/data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm

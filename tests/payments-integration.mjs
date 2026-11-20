@@ -1,10 +1,6 @@
-import {createRequire} from 'node:module';
-import {fileURLToPath} from 'node:url';
-import {readFile,readdir} from 'node:fs/promises';
+import {createTestApp,createFetchMock} from './node-app.mjs';
 import {createHash,randomUUID} from 'node:crypto';
 import assert from 'node:assert/strict';
-const require=createRequire(import.meta.url),wr=createRequire(require.resolve('wrangler/package.json')),{Miniflare,createFetchMock}=wr('miniflare');
-const root=fileURLToPath(new URL('../dist/server/',import.meta.url)),files=(await readdir(root,{recursive:true})).filter(f=>/\.m?js$/.test(f));
 const fetchMock=createFetchMock();fetchMock.disableNetConnect();
 const terminal='fixtureDEMO',password='fixture-not-real',cookie='__Host-criterion_session='+'a'.repeat(64),owner='payment-user';
 const receiptEmails=[];const bankPayments=new Map();let initCount=0,checks=0,failAI=false,failInit=false,lostInit=false,unreceivedInit=false,failCheckOrder=false;
@@ -34,14 +30,14 @@ fetchMock.get('https://api.openai.com').intercept({path:'/v1/chat/completions',m
   const value=request.messages[0].content.includes('Режим интервью')?{reply:'Какой срок согласован?',facts:{subject:'Тестовая услуга'},ready:true}:input.expectedSections?{sections:input.expectedSections.map(s=>({...s,content:'PRIVATE-GENERATED-'+s.id})),issues:[{id:'private',severity:'info',title:'Review',detail:'PRIVATE-REVIEW'}]}:{issues:[{id:'check',severity:'info',title:'Проверено',detail:'PRIVATE-REVIEW'}]};
   return JSON.stringify({choices:[{message:{content:JSON.stringify(value)},finish_reason:'stop'}]});
 }).persist();
-const mf=new Miniflare({modules:['index.js',...files.filter(f=>f!=='index.js')].map(path=>({type:'ESModule',path:root+path})),modulesRoot:root,compatibilityDate:'2026-05-15',compatibilityFlags:['nodejs_compat'],d1Databases:{DB:'payments-isolated'},bindings:{PII_ANALYZER_URL:'https://pii.test/analyze',PII_ANALYZER_TOKEN:piiToken,OPENAI_API_KEY:'fixture-only',TBANK_ENABLED:'true',TBANK_TERMINAL_KEY:terminal,TBANK_PASSWORD:password,TBANK_PUBLIC_URL:'https://criterion.test',TBANK_RECEIPT_MODE:'bank',TBANK_TAXATION:'usn_income',TBANK_TAX:'none',TBANK_PAYMENT_METHOD:'full_payment',TBANK_PAYMENT_OBJECT:'intellectual_activity'},fetchMock,cf:false});
+const mf=await createTestApp({bindings:{PII_ANALYZER_URL:'https://pii.test/analyze',PII_ANALYZER_TOKEN:piiToken,OPENAI_API_KEY:'fixture-only',TBANK_ENABLED:'true',TBANK_TERMINAL_KEY:terminal,TBANK_PASSWORD:password,TBANK_PUBLIC_URL:'https://criterion.test',TBANK_RECEIPT_MODE:'bank',TBANK_TAXATION:'usn_income',TBANK_TAX:'none',TBANK_PAYMENT_METHOD:'full_payment',TBANK_PAYMENT_OBJECT:'intellectual_activity'},fetchMock});
 async function request(path,method='GET',body,status=200,headers={}){
   const response=await mf.dispatchFetch('https://criterion.test'+path,{method,headers:{cookie,Origin:'https://criterion.test',...(body?{'content-type':'application/json'}:{}),...headers},body:body?JSON.stringify(body):undefined});
   const data=await response.json();assert.equal(response.status,status,JSON.stringify(data));checks++;return data;
 }
 async function notification(payment,changes={},expected=200){const body={...payment,...changes};delete body.PaymentURL;body.Token=token(body);const response=await mf.dispatchFetch('https://criterion.test/api/payments/tbank/notification',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});assert.equal(response.status,expected,await response.clone().text());if(expected===200)assert.equal(await response.text(),'OK');checks++;}
 try{
-  const db=await mf.getD1Database('DB');for(const file of (await readdir(new URL('../drizzle/',import.meta.url))).filter(f=>f.endsWith('.sql')).sort())for(const sql of (await readFile(new URL('../drizzle/'+file,import.meta.url),'utf8')).split('--> statement-breakpoint').map(s=>s.trim()).filter(Boolean))await db.prepare(sql).run();
+ const db=mf.database();
   await db.prepare('INSERT INTO accounts(id,email,password_hash,salt,recovery_hash,created_at) VALUES(?,?,?,?,?,?)').bind(owner,'payments@example.test','test','test','test',Date.now()).run();
   await db.prepare('INSERT INTO sessions(token_hash,account_id,expires_at) VALUES(?,?,?)').bind(createHash('sha256').update('a'.repeat(64)).digest('hex'),owner,Date.now()+600000).run();
   let doc=await request('/api/documents','POST',{kind:'services',mode:'ai'},201),path='/api/documents/'+doc.id;

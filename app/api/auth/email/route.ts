@@ -1,4 +1,5 @@
-import {env} from 'cloudflare:workers';
+import {sameOrigin,clientAddress} from '../../../../lib/criterion/request-security';
+import {env} from '../../../../lib/runtime';
 import {z} from 'zod';
 import {digest,getAccount,passwordHash,randomToken,sessionCookie} from '../../../../lib/criterion/auth';
 import {mailReady} from '../../../../lib/criterion/mail';
@@ -6,7 +7,7 @@ import {issueEmail,mailConfig} from '../../../../lib/criterion/email-tokens';
 import {failure,HttpError,json} from '../../../../lib/criterion/server';
 const generic='Если адрес подтверждён и связан с аккаунтом, мы отправим ссылку для сброса пароля. Проверьте входящие и спам.';
 export async function POST(request:Request){try{
- if(!request.headers.get('origin')||request.headers.get('origin')!==new URL(request.url).origin||request.headers.get('sec-fetch-site')==='cross-site')throw new HttpError(403,'Запрос должен исходить из этого приложения.');
+ if(!sameOrigin(request)||request.headers.get('sec-fetch-site')==='cross-site')throw new HttpError(403,'Запрос должен исходить из этого приложения.');
  if(!request.headers.get('content-type')?.includes('application/json'))throw new HttpError(415,'Ожидается JSON.');
  const raw=await request.text();if(raw.length>4096)throw new HttpError(413,'Слишком большой запрос.');
  let parsed:unknown;try{parsed=JSON.parse(raw)}catch{throw new HttpError(400,'Некорректный запрос.')}
@@ -17,7 +18,7 @@ export async function POST(request:Request){try{
  const user=data.action==='send-verification'||data.action==='verify'?await getAccount():null;
  if((data.action==='send-verification'||data.action==='verify')&&!user)throw new HttpError(401,'Войдите в аккаунт в этом браузере и снова откройте ссылку подтверждения.');
  const target=sending?(email||user?.email||'email'):(user?.email||await digest(data.token||''));const window=sending?3600000:900000;
- for(const [scope,limit] of [[`mail-ip:${request.headers.get('cf-connecting-ip')||'unknown'}`,sending?20:40],[`mail-target:${sending?'send':'consume'}:${target}`,sending?3:20]] as const){const row=await db.prepare('INSERT INTO auth_limits (key,count,expires_at) VALUES (?,1,?) ON CONFLICT(key) DO UPDATE SET count=CASE WHEN expires_at<=? THEN 1 ELSE count+1 END, expires_at=CASE WHEN expires_at<=? THEN excluded.expires_at ELSE expires_at END RETURNING count').bind(await digest(scope),now+window,now,now).first<{count:number}>();if((row?.count||0)>limit)throw new HttpError(429,'Слишком много запросов. Попробуйте позже.');}
+ for(const [scope,limit] of [[`mail-ip:${clientAddress(request)}`,sending?20:40],[`mail-target:${sending?'send':'consume'}:${target}`,sending?3:20]] as const){const row=await db.prepare('INSERT INTO auth_limits (key,count,expires_at) VALUES (?,1,?) ON CONFLICT(key) DO UPDATE SET count=CASE WHEN expires_at<=? THEN 1 ELSE count+1 END, expires_at=CASE WHEN expires_at<=? THEN excluded.expires_at ELSE expires_at END RETURNING count').bind(await digest(scope),now+window,now,now).first<{count:number}>();if((row?.count||0)>limit)throw new HttpError(429,'Слишком много запросов. Попробуйте позже.');}
  if(data.action==='send-verification'){
   if(user!.emailVerified)return json({ok:true,message:'Email уже подтверждён.'});
   try{await issueEmail(user!.userId,'verify')}catch{throw new HttpError(503,'Не удалось отправить письмо. Повторите позже.');}

@@ -1,0 +1,45 @@
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import { setTimeout as delay } from 'node:timers/promises';
+const image = process.env.CRITERION_TEST_IMAGE || 'criterion:docker';
+const suffix = randomBytes(6).toString('hex'), name = 'criterion-check-' + suffix, volume = name + '-data';
+const env = { ...process.env, PII_ANALYZER_TOKEN: randomBytes(32).toString('hex') };
+function docker(args, check = true) {
+  if (args[0] === 'exec') args = ['exec', '--user', '10001:10001', ...args.slice(1)];
+  const result = spawnSync('docker', args, { encoding: 'utf8', env, windowsHide: true, timeout: 120000 });
+  if (check && (result.error || result.status !== 0)) throw new Error('Docker ' + args[0] + ' failed: ' + (result.stderr || result.error));
+  return result;
+}
+let created = false;
+try {
+  docker(['volume', 'create', volume]);
+  docker(['run', '-d', '--name', name, '--network', 'none', '--read-only', '--memory', '1536m', '--cpus', '2',
+    '--tmpfs', '/tmp:rw,nosuid,size=64m', '--mount', 'type=volume,source=' + volume + ',target=/data',
+    '--mount', 'type=bind,source=' + fileURLToPath(new URL('./', import.meta.url)) + ',target=/test,readonly',
+    '-e', 'PII_ANALYZER_TOKEN', '-e', 'AUTH_PUBLIC_URL=https://criterion.test', '-e', 'OPENAI_API_KEY=fixture-only',
+    image, 'node', 'scripts/run-with-pii.mjs', '--', 'node', '--import', 'file:///test/container-provider.mjs', 'scripts/start-site.mjs', 'server.js']);
+  created = true;
+  async function ready() {
+    for (let i = 0; i < 70; i++) {
+      if (docker(['exec', name, 'node', 'scripts/run-with-pii.mjs', '--healthcheck'], false).status === 0) return;
+      if (docker(['inspect', '--format', '{{.State.Running}}', name]).stdout.trim() !== 'true') break;
+      await delay(1000);
+    }
+    throw new Error('Container not ready: ' + docker(['logs', name], false).stderr);
+  }
+  await ready();
+  assert.equal(docker(['exec', name, 'node', '-p', "require('fs').statSync('/proc/1').uid"]).stdout.trim(), '10001');
+  console.log(docker(['exec', name, 'python', 'scripts/check-pii-endpoint.py', '--url', 'http://127.0.0.1:8100/analyze']).stdout.trim());
+  console.log(docker(['exec', name, 'node', '/test/container-client.mjs']).stdout.trim());
+  assert.match(docker(['exec', name, 'python', 'scripts/backup-db.py']).stdout, /backups\/criterion-/);
+  docker(['restart', '--time', '15', name]); await ready();
+  console.log(docker(['exec', name, 'node', '/test/container-client.mjs', '--persisted']).stdout.trim());
+  docker(['stop', '--time', '15', name]);
+  assert.equal(docker(['inspect', '--format', '{{.State.ExitCode}}', name]).stdout.trim(), '0');
+  console.log('Container SIGTERM exit=0; test network disabled; all runtime processes run without root.');
+} finally {
+  if (created) docker(['rm', '-f', name], false);
+  docker(['volume', 'rm', volume], false);
+}

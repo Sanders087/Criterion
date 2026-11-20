@@ -1,19 +1,15 @@
-import {fileURLToPath} from 'node:url';
-import {createRequire} from 'node:module';
-import {readFile,readdir} from 'node:fs/promises';
+import {createTestApp,createFetchMock} from './node-app.mjs';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-const require=createRequire(import.meta.url),wr=createRequire(require.resolve('wrangler/package.json')),{Miniflare,createFetchMock}=wr('miniflare');
-const root=fileURLToPath(new URL('../dist/server/',import.meta.url)),files=(await readdir(root,{recursive:true})).filter(f=>/\.m?js$/.test(f));
 const fetchMock=createFetchMock();fetchMock.disableNetConnect();const sent=[];let failMail=false;
 fetchMock.get('https://api.resend.com').intercept({path:'/emails',method:'POST'}).reply(200,async options=>{if(failMail)return '{}';sent.push(await new Response(options.body).json());return JSON.stringify({id:'mock-message-id'})}).persist();
-const mf=new Miniflare({modules:['index.js',...files.filter(f=>f!=='index.js')].map(path=>({type:'ESModule',path:root+path})),modulesRoot:root,compatibilityDate:'2026-05-15',compatibilityFlags:['nodejs_compat'],d1Databases:{DB:'mail-isolated'},bindings:{RESEND_API_KEY:'test-key-not-real',EMAIL_FROM:'Criterion <test@example.com>',AUTH_PUBLIC_URL:'https://criterion.test'},fetchMock,cf:false});
+const mf=await createTestApp({bindings:{RESEND_API_KEY:'test-key-not-real',EMAIL_FROM:'Criterion <test@example.com>',AUTH_PUBLIC_URL:'https://criterion.test'},fetchMock});
 let checks=0;
 async function req(path,body,cookie='',status=200,headers={}){const r=await mf.dispatchFetch('https://criterion.test'+path,{method:body?'POST':'GET',headers:{Origin:'https://criterion.test',...(body?{'content-type':'application/json'}:{}),...(cookie?{cookie}:{}),...headers},body:body?JSON.stringify(body):undefined});const data=await r.json();assert.equal(r.status,status,JSON.stringify(data));checks++;return {data,cookie:r.headers.get('set-cookie')?.split(';')[0]};}
 const tokenFrom=mail=>new URLSearchParams(new URL(mail.text.match(/https:\/\/criterion.test\/auth#[^\s]+/)[0]).hash.slice(1)).get('token');
 const digest=t=>createHash('sha256').update(t).digest('hex');
 try{
- const db=await mf.getD1Database('DB');for(const file of (await readdir(new URL('../drizzle/',import.meta.url))).filter(f=>f.endsWith('.sql')).sort())for(const s of (await readFile(new URL('../drizzle/'+file,import.meta.url),'utf8')).split('--> statement-breakpoint').map(s=>s.trim()).filter(Boolean))await db.prepare(s).run();
+ const db=mf.database();
  const endpoint='/api/auth/email',email='verified@example.com',password='Synthetic-Passphrase-2026';
  assert.equal((await req('/api/auth')).data.mailReady,true);
  await req(endpoint,{action:'request-reset',email},'',403,{Origin:'https://evil.test'});

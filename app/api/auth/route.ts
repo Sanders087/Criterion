@@ -1,13 +1,14 @@
-import {env} from 'cloudflare:workers';
+import {env} from '../../../lib/runtime';
 import {mailReady} from '../../../lib/criterion/mail';
 import {mailConfig,issueEmail} from '../../../lib/criterion/email-tokens';
 import {z} from 'zod';
+import {sameOrigin,clientAddress} from '../../../lib/criterion/request-security';
 import {getChatGPTUser} from '../../chatgpt-auth';
 import {digest,passwordHash,randomToken,equal,sessionToken,sessionCookie,getAccount} from '../../../lib/criterion/auth';
 import {failure,HttpError,json} from '../../../lib/criterion/server';
 export async function GET(){try{const [user,legacy]=await Promise.all([getAccount(),getChatGPTUser()]);return json({user,legacyAvailable:!!legacy,mailReady:mailReady(mailConfig())})}catch(e){return failure(e)}}
 export async function POST(request:Request){try{
- const origin=request.headers.get('origin');if(!origin||new URL(origin).origin!==new URL(request.url).origin||request.headers.get('sec-fetch-site')==='cross-site')throw new HttpError(403,'Запрос должен исходить из этого приложения.');
+ if(!sameOrigin(request)||request.headers.get('sec-fetch-site')==='cross-site')throw new HttpError(403,'Запрос должен исходить из этого приложения.');
  if(!request.headers.get('content-type')?.includes('application/json'))throw new HttpError(415,'Ожидается JSON.');
  const raw=await request.text();if(raw.length>4096)throw new HttpError(413,'Слишком большой запрос.');
  const data=z.object({action:z.enum(['register','login','logout','recover']),email:z.string().trim().email().max(254).optional(),password:z.string().max(256).optional(),recoveryCode:z.string().max(100).optional(),linkLegacy:z.boolean().optional()}).parse(JSON.parse(raw));
@@ -15,7 +16,7 @@ export async function POST(request:Request){try{
  if(data.action==='logout'){const token=sessionToken(request.headers);if(token)await env.DB!.prepare('DELETE FROM sessions WHERE token_hash=?').bind(await digest(token)).run();return Response.json({ok:true},{headers:{'Set-Cookie':sessionCookie('',0),'Cache-Control':'no-store'}})}
  const email=data.email?.toLowerCase();if(!email||!data.password)throw new HttpError(400,'Введите email и пароль.');
  // Atomic fixed-window limits, per IP and email. No secrets are stored in limit keys.
- const ip=request.headers.get('cf-connecting-ip')||'unknown';
+ const ip=clientAddress(request);
  for(const [scope,limit] of [['ip:'+ip,40],['email:'+email,10]] as const){const key=await digest(scope);const row=await env.DB!.prepare('INSERT INTO auth_limits (key,count,expires_at) VALUES (?,1,?) ON CONFLICT(key) DO UPDATE SET count=CASE WHEN expires_at<=? THEN 1 ELSE count+1 END, expires_at=CASE WHEN expires_at<=? THEN excluded.expires_at ELSE expires_at END RETURNING count').bind(key,now+15*60*1000,now,now).first<{count:number}>();if((row?.count||0)>limit)throw new HttpError(429,'Слишком много попыток. Повторите через 15 минут.');}
  let account=await env.DB!.prepare('SELECT * FROM accounts WHERE email=?').bind(email).first<{id:string,email:string,password_hash:string,salt:string,recovery_hash:string}>();
  let recoveryCode:string|undefined;

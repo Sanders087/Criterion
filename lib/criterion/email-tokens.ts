@@ -1,7 +1,7 @@
-import {env} from 'cloudflare:workers';
+import {env} from '../runtime';
 import {digest,randomToken} from './auth';
 import {sendAuthMail,type MailConfig,mailReady} from './mail';
-export const mailConfig=()=>env as Cloudflare.Env & MailConfig;
+export const mailConfig=()=>env as MailConfig;
 export async function issueEmail(accountId:string,purpose:'verify'|'reset'){
  const config=mailConfig();if(!mailReady(config))throw new Error('MAIL_NOT_CONFIGURED');
  const account=await env.DB!.prepare('SELECT email,password_hash FROM accounts WHERE id=?').bind(accountId).first<{email:string,password_hash:string}>();if(!account)throw new Error('ACCOUNT_NOT_FOUND');
