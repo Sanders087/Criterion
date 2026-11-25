@@ -10,6 +10,16 @@ async function request(path,method='GET',body,owner='qa-owner',expected=200,extr
  const data=await res.json();assert.equal(res.status,expected,JSON.stringify(data));checks++;return data;
 }
 try{
+ const health=await (await mf.dispatchFetch('https://criterion.test/api/health')).json();
+ assert.deepEqual(health,{status:'ready'});checks++;
+ const events=mf.logs().split('\n').filter(line=>line.startsWith('{')).map(line=>JSON.parse(line));
+ const ready=events.find(event=>event.event==='database.ready');
+ assert.equal(ready.queryOk,true);assert.equal(ready.existedBeforeOpen,true);assert.equal(ready.migrationsOk,true);
+ assert.ok(ready.databasePath.endsWith('test.sqlite'));
+ const opened=events.find(event=>event.event==='storage.snapshot'&&event.phase==='after_open');
+ assert.equal(opened.databasePath,ready.databasePath);assert.equal(opened.database.exists,true);
+ assert.equal(opened.database.processCanRead,true);assert.equal(opened.mount.persistenceVerified,false);checks++;
+ assert.equal(events.find(event=>event.event==='integrations.configuration').providerAvailability,'not_checked');
  const db=mf.database();
  for(const [id,token] of Object.entries(testTokens)){await db.prepare('INSERT INTO accounts (id,email,password_hash,salt,recovery_hash,created_at) VALUES (?,?,?,?,?,?)').bind(id,id+'@example.test','test','test','test',Date.now()).run();await db.prepare('INSERT INTO sessions (token_hash,account_id,expires_at) VALUES (?,?,?)').bind(createHash('sha256').update(token).digest('hex'),id,Date.now()+86400000).run();}
  const defaults=await request('/api/workspace');assert.match(defaults.materials.prompt,/универсальные правила/);assert.equal(JSON.parse(defaults.materials.template).length,9);checks++;

@@ -3,6 +3,7 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
+import { diagnostic } from '../lib/diagnostics.mjs';
 
 const endpoint = 'http://127.0.0.1:8100/analyze';
 export function configuration(env = process.env) {
@@ -30,19 +31,26 @@ export function configuration(env = process.env) {
   return { siteEnv, piiEnv, siteHealth: 'http://127.0.0.1:' + port + healthPath };
 }
 
+export async function serviceStatus(config, includeSite = true) {
+  async function check(url, pii) {
+    try {
+      const response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(2000),
+        headers: { Connection: 'close', ...(pii ? { Authorization: 'Bearer ' + config.piiEnv.PII_ANALYZER_TOKEN } : {}) } });
+      let ready = pii ? response.status === 200 : response.status >= 200 && response.status < 400;
+      if (pii && ready) ready = (await response.json()).status === 'ready';
+      else await response.body?.cancel();
+      return { status: ready ? 'ready' : 'unavailable', httpStatus: response.status };
+    } catch { return { status: 'unreachable' }; }
+  }
+  const [pii, site] = await Promise.all([
+    check('http://127.0.0.1:8100/health', true),
+    includeSite ? check(config.siteHealth, false) : Promise.resolve(null),
+  ]);
+  return { pii, ...(includeSite ? { site } : {}) };
+}
 export async function healthy(config, includeSite = true) {
-  try {
-    const pii = await fetch('http://127.0.0.1:8100/health', {
-      headers: { Authorization: 'Bearer ' + config.piiEnv.PII_ANALYZER_TOKEN },
-      redirect: 'manual', signal: AbortSignal.timeout(2000),
-    });
-    const piiOk = pii.status === 200 && (await pii.json()).status === 'ready';
-    if (!piiOk) return false;
-    if (!includeSite) return true;
-    const site = await fetch(config.siteHealth, { redirect: 'manual', signal: AbortSignal.timeout(2000) });
-    await site.body?.cancel();
-    return site.status >= 200 && site.status < 400;
-  } catch { return false; }
+  const state = await serviceStatus(config, includeSite);
+  return state.pii.status === 'ready' && (!includeSite || state.site.status === 'ready');
 }
 
 // The optional command override supports isolated process-lifecycle tests.
@@ -54,6 +62,8 @@ export async function supervise(siteCommand, { env = process.env, piiCommand } =
   }
   const children = [];
   let stopping = false;
+  let monitorTimer;
+  let lastHealth = '', lastHealthLog = 0;
   let finish;
   const done = new Promise(resolve => { finish = resolve; });
   function signalChild(child, signal) {
@@ -65,6 +75,8 @@ export async function supervise(siteCommand, { env = process.env, piiCommand } =
   async function stop(code) {
     if (stopping) return;
     stopping = true;
+    clearTimeout(monitorTimer);
+    diagnostic('services.stopping', { exitCode: code });
     const exits = children.map(child => child.exitCode !== null || child.signalCode !== null
       ? Promise.resolve() : new Promise(resolve => { child.once('exit', resolve); child.once('error', resolve); }));
     for (const child of children) signalChild(child, 'SIGTERM');
@@ -79,7 +91,7 @@ export async function supervise(siteCommand, { env = process.env, piiCommand } =
     process.removeListener('SIGINT', onTerm);
     finish(code);
   }
-  const onTerm = () => { void stop(0); };
+  const onTerm = () => { diagnostic('services.signal', { reason: 'termination_requested' }); void stop(0); };
   process.on('SIGTERM', onTerm);
   process.on('SIGINT', onTerm);
   function launch(command, childEnv, name) {
@@ -88,17 +100,33 @@ export async function supervise(siteCommand, { env = process.env, piiCommand } =
       detached: process.platform !== 'win32',
     });
     children.push(child);
+    diagnostic('service.starting', { component: name });
     child.once('error', () => {
+      diagnostic('service.failed', { component: name, reason: 'spawn_failed' }, 'error');
       console.error('Criterion: failed to start ' + name + '.');
       void stop(1);
     });
-    child.once('exit', () => {
+    child.once('exit', (code, signal) => {
+      diagnostic('service.exited', { component: name, exitCode: code, signal, expected: stopping }, stopping ? 'info' : 'error');
       if (!stopping) {
         console.error('Criterion: ' + name + ' stopped; shutting down the container.');
         void stop(1);
       }
     });
     return child;
+  }
+  async function monitor() {
+    if (stopping) return;
+    const state = await serviceStatus(config);
+    if (stopping) return;
+    const key = JSON.stringify(state), now = Date.now();
+    if (key !== lastHealth || now - lastHealthLog >= 300_000) {
+      diagnostic('services.health', state);
+      lastHealth = key; lastHealthLog = now;
+    }
+    // Poll during startup, then every 30 seconds; log changes and a five-minute heartbeat.
+    monitorTimer = setTimeout(monitor, state.site.status === 'ready' ? 30_000 : 2000);
+    monitorTimer.unref();
   }
   try {
     launch(piiCommand || [env.PII_PYTHON || 'python', '-m', 'uvicorn', 'services.pii.app:create_app',
@@ -107,6 +135,7 @@ export async function supervise(siteCommand, { env = process.env, piiCommand } =
     const deadline = Date.now() + 90_000;
     while (!stopping && !(await healthy(config, false))) {
       if (Date.now() >= deadline) {
+        diagnostic('service.failed', { component: 'PII detector', reason: 'readiness_timeout' }, 'error');
         console.error('Criterion: PII detector readiness timed out.');
         await stop(1);
         break;
@@ -115,7 +144,9 @@ export async function supervise(siteCommand, { env = process.env, piiCommand } =
     }
     if (!stopping) {
       console.log('Criterion: PII detector ready; starting site.');
+      diagnostic('service.ready', { component: 'PII detector' });
       launch(siteCommand, config.siteEnv, 'site');
+      void monitor();
     }
     return await done;
   } catch {
@@ -128,7 +159,13 @@ export async function supervise(siteCommand, { env = process.env, piiCommand } =
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     const args = process.argv.slice(2);
-    if (args.length === 1 && args[0] === '--healthcheck') {
+    if (args.length === 1 && args[0] === '--diagnostics') {
+      const { inspectStorage } = await import('./storage-diagnostics.mjs');
+      const databaseReady = process.env.DATABASE_PATH ? inspectStorage(process.env.DATABASE_PATH) : false;
+      const state = await serviceStatus(configuration());
+      diagnostic('services.health', state);
+      process.exitCode = databaseReady && state.pii.status === 'ready' && state.site.status === 'ready' ? 0 : 1;
+    } else if (args.length === 1 && args[0] === '--healthcheck') {
       process.exitCode = await healthy(configuration()) ? 0 : 1;
     } else {
       process.exitCode = await supervise(args[0] === '--' ? args.slice(1) : args);

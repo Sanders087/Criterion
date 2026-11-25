@@ -86,6 +86,9 @@ test('real child processes start in order; detector loss stops site; combined he
     await assert.rejects(fetch('http://127.0.0.1:'+r.port+'/', {signal:AbortSignal.timeout(500)}));
     assert.ok(!r.logs().includes(token));
     assert.ok(!r.logs().includes('synthetic-key'));
+    assert.match(r.logs(), /service\.ready/);
+    assert.match(r.logs(), /service\.exited/);
+    assert.match(r.logs(), /services\.stopping/);
   } finally { await shutdown(r); }
 });
 

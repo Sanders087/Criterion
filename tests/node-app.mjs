@@ -63,7 +63,8 @@ export async function createTestApp({ bindings = {}, fetchMock = createFetchMock
   const origin = 'http://127.0.0.1:' + port;
   try {
     let ready = false;
-    for (let attempt = 0; attempt < 100; attempt++) {
+    const startupDeadline = Date.now() + 60_000;
+    while (Date.now() < startupDeadline) {
       if (exited) throw new Error('Next server exited: ' + output);
       try { ready = (await fetch(origin + '/api/health', { signal: AbortSignal.timeout(500) })).ok; } catch {}
       if (ready) break;

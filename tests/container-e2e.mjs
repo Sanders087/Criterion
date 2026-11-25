@@ -30,6 +30,18 @@ try {
     throw new Error('Container not ready: ' + docker(['logs', name], false).stderr);
   }
   await ready();
+  const rawLogs=docker(['logs',name]);
+  const events=(rawLogs.stdout+'\n'+rawLogs.stderr).split('\n').filter(line=>line.startsWith('{')).map(line=>JSON.parse(line));
+  assert.ok(events.some(e=>e.event==='storage.entrypoint'&&e.phase==='before_permissions'));
+  const storage=events.find(e=>e.event==='storage.snapshot'&&e.phase==='after_open');
+  assert.equal(storage.databasePath,'/data/criterion.sqlite');
+  assert.equal(storage.mount.mountPoint,'/data');assert.equal(storage.mount.separateMount,true);
+  assert.equal(storage.mount.persistenceVerified,false);assert.equal(storage.database.uid,10001);
+  assert.ok(events.some(e=>e.event==='database.ready'&&e.queryOk&&e.databasePath==='/data/criterion.sqlite'));
+  assert.ok(!rawLogs.stdout.includes(env.PII_ANALYZER_TOKEN));
+  assert.ok(!rawLogs.stderr.includes(env.PII_ANALYZER_TOKEN));
+  assert.match(docker(['exec',name,'node','scripts/run-with-pii.mjs','--diagnostics']).stdout,/database.inspection/);
+  console.log('Storage diagnostics: actual SQLite file and /data mount verified; no secrets in events.');
   assert.equal(docker(['exec', name, 'node', '-p', "require('fs').statSync('/proc/1').uid"]).stdout.trim(), '10001');
   console.log(docker(['exec', name, 'python', 'scripts/check-pii-endpoint.py', '--url', 'http://127.0.0.1:8100/analyze']).stdout.trim());
   console.log(docker(['exec', name, 'node', '/test/container-client.mjs']).stdout.trim());
@@ -39,6 +51,12 @@ try {
   docker(['stop', '--time', '15', name]);
   assert.equal(docker(['inspect', '--format', '{{.State.ExitCode}}', name]).stdout.trim(), '0');
   console.log('Container SIGTERM exit=0; test network disabled; all runtime processes run without root.');
+} catch (error) {
+  if (created) {
+    const logs=docker(['logs',name],false);
+    console.error((logs.stdout+'\n'+logs.stderr).slice(-10000));
+  }
+  throw error;
 } finally {
   if (created) docker(['rm', '-f', name], false);
   docker(['volume', 'rm', volume], false);
