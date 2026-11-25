@@ -2,7 +2,7 @@ import {createTestApp,createFetchMock} from './node-app.mjs';
 import {createHash,randomUUID} from 'node:crypto';
 import assert from 'node:assert/strict';
 const fetchMock=createFetchMock();fetchMock.disableNetConnect();
-const terminal='fixtureDEMO',password='fixture-not-real',cookie='__Host-criterion_session='+'a'.repeat(64),owner='payment-user';
+const terminal='fixtureDEMO',password='!fixture-not-real-Ж$"',cookie='__Host-criterion_session='+'a'.repeat(64),owner='payment-user';
 const receiptEmails=[];const bankPayments=new Map();let initCount=0,checks=0,failAI=false,failInit=false,lostInit=false,unreceivedInit=false,failCheckOrder=false;
 let failDetector=false,modelCalls=0;
 const piiToken='fixture-pii-token-with-at-least-32-characters';
@@ -30,7 +30,7 @@ fetchMock.get('https://api.openai.com').intercept({path:'/v1/chat/completions',m
   const value=request.messages[0].content.includes('Режим интервью')?{reply:'Какой срок согласован?',facts:{subject:'Тестовая услуга'},ready:true}:input.expectedSections?{sections:input.expectedSections.map(s=>({...s,content:'PRIVATE-GENERATED-'+s.id})),issues:[{id:'private',severity:'info',title:'Review',detail:'PRIVATE-REVIEW'}]}:{issues:[{id:'check',severity:'info',title:'Проверено',detail:'PRIVATE-REVIEW'}]};
   return JSON.stringify({choices:[{message:{content:JSON.stringify(value)},finish_reason:'stop'}]});
 }).persist();
-const mf=await createTestApp({bindings:{PII_ANALYZER_URL:'https://pii.test/analyze',PII_ANALYZER_TOKEN:piiToken,OPENAI_API_KEY:'fixture-only',TBANK_ENABLED:'true',TBANK_TERMINAL_KEY:terminal,TBANK_PASSWORD:password,TBANK_PUBLIC_URL:'https://criterion.test',TBANK_RECEIPT_MODE:'bank',TBANK_TAXATION:'usn_income',TBANK_TAX:'none',TBANK_PAYMENT_METHOD:'full_payment',TBANK_PAYMENT_OBJECT:'intellectual_activity'},fetchMock});
+const mf=await createTestApp({bindings:{PII_ANALYZER_URL:'https://pii.test/analyze',PII_ANALYZER_TOKEN:piiToken,OPENAI_API_KEY:'fixture-only',TBANK_ENABLED:'true',TBANK_TERMINAL_KEY:terminal,TBANK_PASSWORD_BASE64:Buffer.from(password,'utf8').toString('base64'),TBANK_PUBLIC_URL:'https://criterion.test',TBANK_RECEIPT_MODE:'bank',TBANK_TAXATION:'usn_income',TBANK_TAX:'none',TBANK_PAYMENT_METHOD:'full_payment',TBANK_PAYMENT_OBJECT:'intellectual_activity'},fetchMock});
 async function request(path,method='GET',body,status=200,headers={}){
   const response=await mf.dispatchFetch('https://criterion.test'+path,{method,headers:{cookie,Origin:'https://criterion.test',...(body?{'content-type':'application/json'}:{}),...headers},body:body?JSON.stringify(body):undefined});
   const data=await response.json();assert.equal(response.status,status,JSON.stringify(data));checks++;return data;

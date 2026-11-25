@@ -13,11 +13,12 @@ const fixture = fileURLToPath(new URL('./fixtures/shared-process.mjs', import.me
 
 test('shared-container config isolates Python secrets and pins the loopback endpoint', () => {
   const config = configuration({ PII_ANALYZER_TOKEN: token, OPENAI_API_KEY: 'synthetic-key',
-    DATABASE_URL: 'synthetic-db', RESEND_API_KEY: 'synthetic-mail', PATH: process.env.PATH });
+    DATABASE_URL: 'synthetic-db', RESEND_API_KEY: 'synthetic-mail', TBANK_PASSWORD_BASE64: 'IWZpeHR1cmU=', PATH: process.env.PATH });
   assert.equal(config.siteEnv.OPENAI_API_KEY, 'synthetic-key');
   assert.equal(config.siteEnv.PII_ANALYZER_URL, 'http://127.0.0.1:8100/analyze');
   assert.equal(config.siteEnv.HOSTNAME, '0.0.0.0');
-  for (const key of ['OPENAI_API_KEY', 'DATABASE_URL', 'RESEND_API_KEY']) assert.equal(config.piiEnv[key], undefined);
+  assert.equal(config.siteEnv.TBANK_PASSWORD_BASE64, 'IWZpeHR1cmU=');
+  for (const key of ['OPENAI_API_KEY', 'DATABASE_URL', 'RESEND_API_KEY', 'TBANK_PASSWORD_BASE64']) assert.equal(config.piiEnv[key], undefined);
   for (const extra of [{PII_ANALYZER_TOKEN:'short'}, {PII_ANALYZER_TOKEN:'x'.repeat(32)+'\n'},
     {PORT:'8100'}, {PORT:'bad'}, {PII_ANALYZER_URL:'https://outside.test/analyze'}, {SITE_HEALTH_PATH:'//outside.test'}]) {
     assert.throws(() => configuration({ PII_ANALYZER_TOKEN: token, ...extra }));

@@ -5,6 +5,47 @@ import {bankToken,verifyBankToken,initParameters,checkoutReady,paymentUrl,bankRe
 import {presentContract} from '../lib/criterion/billing.ts';
 import {demoContract} from '../lib/criterion/domain.ts';
 const env={TBANK_ENABLED:'true',TBANK_TERMINAL_KEY:'fixtureDEMO',TBANK_PASSWORD:'fixture-password',TBANK_PUBLIC_URL:'https://criterion.test',TBANK_RECEIPT_MODE:'bank',TBANK_TAXATION:'usn_income',TBANK_TAX:'none',TBANK_PAYMENT_METHOD:'full_payment',TBANK_PAYMENT_OBJECT:'intellectual_activity'};
+test('Base64 bank password preserves special characters and signs requests with the original value',async(t)=>{
+  const password='!fixture-Ж$" with spaces ';
+  const encoded=Buffer.from(password,'utf8').toString('base64');
+  const config={...env,TBANK_PASSWORD:undefined,TBANK_PASSWORD_BASE64:encoded};
+  assert.equal(bankConfig(config).password,password);
+  assert.equal(checkoutReady(config),true);
+  t.mock.method(globalThis,'fetch',async(_url:string,options:RequestInit)=>{
+    const body=String(options.body),data=JSON.parse(body);
+    assert.equal(body.includes(password),false);
+    assert.equal(body.includes(encoded),false);
+    assert.equal(Object.hasOwn(data,'Password'),false);
+    assert.equal(await verifyBankToken(data,password),true);
+    assert.equal(await verifyBankToken(data,encoded),false);
+    return Response.json({Success:true,ErrorCode:'0'});
+  });
+  assert.deepEqual(await bankRequest(config,'CheckOrder',{OrderId:'fixture'}),{Success:true,ErrorCode:'0'});
+});
+
+test('Both password formats preserve exact bytes and an empty optional Base64 setting keeps plaintext compatibility',()=>{
+  for(const password of ['!fixture-only',' !fixture-only ','\ufeff!fixture-only']){
+    assert.equal(bankConfig({...env,TBANK_PASSWORD:password,TBANK_PASSWORD_BASE64:''}).password,password);
+    assert.equal(bankConfig({...env,TBANK_PASSWORD:'',TBANK_PASSWORD_BASE64:Buffer.from(password).toString('base64')}).password,password);
+  }
+});
+
+test('Invalid or conflicting Base64 bank settings block requests without exposing credentials',async(t)=>{
+  const encoded=Buffer.from('!fixture-only').toString('base64');
+  const fetch=t.mock.method(globalThis,'fetch',async()=>{throw new Error('Unexpected bank request')});
+  const invalid=[...['!',encoded+' ',encoded+'\n','"'+encoded+'"','_w==','/w==','IR==','IQ='].map(value=>({...env,TBANK_PASSWORD:undefined,TBANK_PASSWORD_BASE64:value})),
+    {...env,TBANK_PASSWORD_BASE64:encoded}];
+  for(const config of invalid){
+    assert.equal(checkoutReady(config),false);
+    await assert.rejects(()=>bankRequest(config,'CheckOrder',{OrderId:'fixture'}),error=>{
+      assert.equal((error as Error & {status:number}).status,503);
+      assert.equal((error as Error).message,'Оплата пока недоступна. Настройки банка ещё не завершены.');
+      return true;
+    });
+  }
+  assert.equal(fetch.mock.callCount(),0);
+});
+
 test('live gateway requires explicit mode and exact notification destination',()=>{
   const live={...env,TBANK_MODE:'live',TBANK_TERMINAL_KEY:'123456789',TBANK_GATEWAY_URL:'https://srv678677.hstgr.cloud/criterion-tbank-live/',TBANK_GATEWAY_SECRET:'d'.repeat(64),TBANK_NOTIFICATION_URL:'https://srv678677.hstgr.cloud/criterion-tbank-live/notification'};
   assert.equal(checkoutReady(live),true);

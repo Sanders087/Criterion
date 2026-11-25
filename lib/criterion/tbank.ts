@@ -1,7 +1,8 @@
+import { Buffer } from 'node:buffer';
 import { CONTRACT_PRICE } from './billing.ts';
 
 export type TBankEnv = {
-  TBANK_ENABLED?:string; TBANK_TERMINAL_KEY?:string; TBANK_PASSWORD?:string;
+  TBANK_ENABLED?:string; TBANK_TERMINAL_KEY?:string; TBANK_PASSWORD?:string; TBANK_PASSWORD_BASE64?:string;
   TBANK_PUBLIC_URL?:string; TBANK_API_URL?:string; TBANK_RECEIPT_MODE?:string;
   TBANK_TAXATION?:string; TBANK_TAX?:string; TBANK_PAYMENT_METHOD?:string; TBANK_PAYMENT_OBJECT?:string;
   TBANK_GATEWAY_URL?:string; TBANK_GATEWAY_SECRET?:string; TBANK_MODE?:string;
@@ -16,8 +17,20 @@ const API_URLS=['https://securepay.tinkoff.ru/v2/','https://rest-api-test.tinkof
 const PAYMENT_HOSTS=['securepay.tinkoff.ru','rest-api-test.tinkoff.ru','pay.tbank-online.com'];
 const taxation=['osn','usn_income','usn_income_outcome','esn','patent'];
 const taxes=['none','vat0','vat5','vat7','vat10','vat22','vat105','vat107','vat110','vat122'];
+function bankPassword(env:TBankEnv){
+  const encoded=env.TBANK_PASSWORD_BASE64;
+  if(!encoded)return env.TBANK_PASSWORD;
+  try{
+    // Reject ambiguous settings and malformed Base64 instead of changing the secret silently.
+    if(env.TBANK_PASSWORD||!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded))throw new Error();
+    const bytes=Buffer.from(encoded,'base64');
+    if(bytes.toString('base64')!==encoded)throw new Error();
+    // Preserve every character, including leading/trailing whitespace and a UTF-8 BOM.
+    return new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(bytes);
+  }catch{throw new PaymentError(503,'Оплата пока недоступна. Настройки банка ещё не завершены.')}
+}
 export function bankConfig(env:TBankEnv){
-  const terminalKey=env.TBANK_TERMINAL_KEY?.trim(),password=env.TBANK_PASSWORD;
+  const terminalKey=env.TBANK_TERMINAL_KEY?.trim(),password=bankPassword(env);
   const apiUrl=env.TBANK_API_URL||API_URLS[0];
   if(!terminalKey||!password||!API_URLS.includes(apiUrl))throw new PaymentError(503,'Оплата пока недоступна. Настройки банка ещё не завершены.');
   if(env.TBANK_MODE==='live'&&!/^\d{5,24}$/.test(terminalKey))throw new PaymentError(503,'Боевой терминал банка ещё не настроен.');
