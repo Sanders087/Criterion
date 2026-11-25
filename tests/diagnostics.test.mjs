@@ -7,14 +7,16 @@ import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { serviceStatus } from '../scripts/run-with-pii.mjs';
-import { parseMountInfo, fileMetadata, safeErrorCode, integrationConfiguration } from '../lib/diagnostics.mjs';
+import { diagnostic, parseMountInfo, fileMetadata, safeErrorCode, integrationConfiguration } from '../lib/diagnostics.mjs';
 
 const inspector = fileURLToPath(new URL('../scripts/storage-diagnostics.mjs', import.meta.url));
 function inspect(filename) {
   const result = spawnSync(process.execPath, [inspector], { encoding: 'utf8', windowsHide: true,
     env: { ...process.env, DATABASE_PATH: filename }, timeout: 10000 });
-  const events = result.stdout.trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
-  const errors = result.stderr.trim().split('\n').filter(line => line.startsWith('{')).map(line => JSON.parse(line));
+  const prefix = 'Criterion diagnostics v2: ';
+  const parse = text => text.split('\n').filter(line => line.startsWith(prefix)).map(line => JSON.parse(line.slice(prefix.length)));
+  const events = parse(result.stdout);
+  const errors = parse(result.stderr);
   return { ...result, events: [...events, ...errors] };
 }
 function temporary(t) {
@@ -22,6 +24,26 @@ function temporary(t) {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
+
+test('Diagnostic metadata remains in one visible text line on stdout and stderr', t => {
+  const stdout = [], stderr = [];
+  t.mock.method(console, 'log', line => stdout.push(line));
+  t.mock.method(console, 'error', line => stderr.push(line));
+  diagnostic('database.ready', { databasePath: '/data/line\nbreak.sqlite', queryOk: true });
+  diagnostic('startup.failed', { errorCode: 'EACCES' }, 'error');
+  assert.equal(stdout.length, 1);
+  assert.equal(stderr.length, 1);
+  const prefix = 'Criterion diagnostics v2: ';
+  for (const line of [...stdout, ...stderr]) {
+    assert.ok(line.startsWith(prefix));
+    assert.equal(line.split('\n').length, 1);
+    const record = JSON.parse(line.slice(prefix.length));
+    assert.equal(record.service, 'criterion');
+    assert.ok(Number.isFinite(Date.parse(record.timestamp)));
+  }
+  assert.equal(JSON.parse(stdout[0].slice(prefix.length)).databasePath, '/data/line\nbreak.sqlite');
+  assert.equal(JSON.parse(stderr[0].slice(prefix.length)).errorCode, 'EACCES');
+});
 
 test('Mount inspection distinguishes container root, dedicated volume and unknown metadata', () => {
   const root = '20 1 0:1 / / rw - overlay overlay rw,secret-option=do-not-log';
@@ -68,7 +90,8 @@ test('Configured external services are not reported as tested, and credential va
   integrationConfiguration({ OPENAI_API_KEY: 'secret-model-value', RESEND_API_KEY: 'secret-mail-value',
     EMAIL_FROM: 'private-fixture@example.test', TBANK_ENABLED: 'true', TBANK_TERMINAL_KEY: 'secret-terminal-value',
     TBANK_PASSWORD_BASE64: 'secret-bank-value' });
-  const data = JSON.parse(lines[0]);
+  assert.ok(lines[0].startsWith('Criterion diagnostics v2: '));
+  const data = JSON.parse(lines[0].slice('Criterion diagnostics v2: '.length));
   assert.equal(data.providerAvailability, 'not_checked');
   assert.equal(data.modelKeyConfigured, true);
   assert.equal(data.mailConfigured, true);

@@ -16,7 +16,7 @@ def permissions(path):
 
 
 def event(name, **fields):
-    print(json.dumps({"timestamp": datetime.now(timezone.utc).isoformat(),
+    print("Criterion diagnostics v2: " + json.dumps({"timestamp": datetime.now(timezone.utc).isoformat(),
                       "service": "criterion", "event": name, **fields}), flush=True)
 
 
