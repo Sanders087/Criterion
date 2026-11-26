@@ -123,6 +123,14 @@ test('automatic retry advice applies only to read methods and known transient fa
   for(const method of ['Init','Cancel'])assert.equal(retryableRead(method,'BANK_TIMEOUT',undefined),false);
 });
 
+test('bank envelopes distinguish a documented error code from an ambiguous Init response', async () => {
+  const { validBankEnvelope } = await import('../lib/payment-network.mjs');
+  for (const code of ['335', 335, '-948', -948]) assert.equal(validBankEnvelope({Success:false,ErrorCode:code}), true);
+  for (const code of [null, '', ' ', '0', 0, '00', '0 ', '1\n', '-0', 'text', {}, 1.5]) {
+    assert.equal(validBankEnvelope({Success:false,ErrorCode:code}), false);
+  }
+});
+
 test('site classifies gateway failures, preserves nested cause and never retries Init', async t => {
   const gateway={...env,TBANK_GATEWAY_URL:'https://srv678677.hstgr.cloud/criterion-tbank/',TBANK_GATEWAY_SECRET:'c'.repeat(64)};
   let reply:Response|undefined, thrown:Error = new Error();
