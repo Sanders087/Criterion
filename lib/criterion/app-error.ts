@@ -1,3 +1,4 @@
+import { databaseFailure } from '../diagnostic-storage.mjs';
 import { ZodError } from 'zod';
 import { getRequestContext } from '../request-context.mjs';
 import { isTechnicalErrorCode } from '../diagnostic-schema.mjs';
@@ -70,9 +71,9 @@ export function normalizeError(error: unknown): AppError {
   if (error instanceof ZodError) return new AppError({ status: 400, code: 'VALIDATION_ERROR',
     publicMessage: 'Проверьте формат данных и длину текста. Изменения не сохранены.',
     service: 'criterion', stage: 'validation', cause: error });
-  const causeCode = technicalCause(error);
-  if (causeCode && (causeCode.startsWith('SQLITE_') || causeCode.startsWith('ERR_SQLITE_'))) {
-    return new AppError({ status: 500, code: 'DATABASE_ERROR', publicMessage: 'Не удалось выполнить операцию с базой данных.',
+  const db = databaseFailure(error);
+  if (db) {
+    return new AppError({ status: ['DB_BUSY','DB_LOCKED'].includes(db.errorCode) ? 503 : 500, code: db.errorCode, publicMessage: 'Не удалось выполнить операцию с базой данных.',
       service: 'database', stage: 'database', cause: error });
   }
   if (error instanceof Error && ['TimeoutError', 'AbortError'].includes(error.name)) {

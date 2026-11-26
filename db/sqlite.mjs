@@ -1,34 +1,93 @@
+import { diagnostic } from '../lib/diagnostics.mjs';
+import { databaseFailure } from '../lib/diagnostic-storage.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 
 // Parameterized SQL adapter shared by the ORM and the transactional auth/payment code.
-export function openDatabase(path, { migrate = true, migrationsDir = process.env.MIGRATIONS_DIR || resolve('drizzle') } = {}) {
+export function openDatabase(path, { migrate = true, busyTimeoutMs = 5000, migrationsDir = process.env.MIGRATIONS_DIR || resolve('drizzle') } = {}) {
+  if (!Number.isInteger(busyTimeoutMs) || busyTimeoutMs < 0 || busyTimeoutMs > 60000) throw new Error('Invalid busy timeout');
   if (path !== ':memory:') mkdirSync(dirname(resolve(path)), { recursive: true, mode: 0o700 });
   const native = new DatabaseSync(path);
-  native.exec('PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;');
+  try { native.exec(`PRAGMA busy_timeout=${busyTimeoutMs}; PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;`); }
+  catch (cause) { native.close(); throw cause; }
+  // The native connection is synchronous. Defer named statement successes until commit,
+  // so a later rollback cannot publish a successful payment grant.
+  let activeTransaction = null;
+  function fail(operation, error, start, details = {}) {
+    const reason = databaseFailure(error);
+    const durationMs = Math.round(performance.now() - start);
+    const fallback = details.transaction ? 'DB_TRANSACTION_FAILED' : 'DATABASE_ERROR';
+    const errorCode = !reason || reason.errorCode === 'DATABASE_ERROR' ? fallback : reason.errorCode;
+    diagnostic('database.operation_failed',{operation,...reason,errorCode,durationMs,
+      ...(errorCode === 'DB_BUSY' ? {busyTimeoutMs,busyTimeoutElapsed:reason?.causeCode==='SQLITE_BUSY_TIMEOUT' ||
+        (busyTimeoutMs > 0 && durationMs >= busyTimeoutMs)} : {}),...details},'error');
+  }
+  function statement(operation, callback) {
+    const started = performance.now();
+    try {
+      const result = callback();
+      if (operation) {
+        const fields = {operation,durationMs:Math.round(performance.now()-started)};
+        if (activeTransaction) activeTransaction.completed.push(fields);
+        else diagnostic('database.operation_completed',fields);
+      }
+      return result;
+    } catch (cause) {
+      if (activeTransaction) activeTransaction.failedOperation = operation;
+      else fail(operation || 'database.query',cause,started);
+      throw cause;
+    }
+  }
   class Statement {
     constructor(sql, params = []) { this.sql = sql; this.params = params; }
     bind(...params) { return new Statement(this.sql, params); }
     /** @template [T=Record<string, unknown>] @returns {T|null} */
-    first() { return /** @type {T|null} */ (native.prepare(this.sql).get(...this.params) ?? null); }
-    all() { return { results: native.prepare(this.sql).all(...this.params) }; }
-    run() {
-      const result = native.prepare(this.sql).run(...this.params);
+    first() { return /** @type {T|null} */ (statement(undefined,() => native.prepare(this.sql).get(...this.params)) ?? null); }
+    all() { return { results: statement(undefined,() => native.prepare(this.sql).all(...this.params)) }; }
+    /** @param {string} [operation] */
+    run(operation) {
+      const result = statement(operation,() => native.prepare(this.sql).run(...this.params));
       return { success: true, meta: { changes: Number(result.changes), last_row_id: Number(result.lastInsertRowid) } };
     }
   }
-  function transaction(callback) {
-    native.exec('BEGIN IMMEDIATE');
-    try { const result = callback(); native.exec('COMMIT'); return result; }
-    catch (error) { native.exec('ROLLBACK'); throw error; }
+  /** @template T @param {() => T} callback @param {string} [operation] @returns {T} */
+  function transaction(callback, operation) {
+    const started = performance.now();
+    const frame = { completed:[], failedOperation:undefined };
+    let began = false;
+    try {
+      native.exec('BEGIN IMMEDIATE');
+      began = true;
+      activeTransaction = frame;
+      const result = callback();
+      native.exec('COMMIT');
+      for (const fields of frame.completed) diagnostic('database.operation_completed',fields);
+      if (operation) diagnostic('database.operation_completed',{operation,durationMs:Math.round(performance.now()-started)});
+      return result;
+    } catch (cause) {
+      let rolledBack = false, rollbackFailed = false;
+      if (began) {
+        try {
+          // Some SQLite errors end the transaction automatically.
+          if (native.isTransaction) native.exec('ROLLBACK');
+          rolledBack = true;
+        } catch { rollbackFailed = true; }
+      }
+      fail(frame.failedOperation || operation || 'database.transaction',cause,started,{
+        transaction:true,rolledBack,rollbackFailed,parentOperation:frame.failedOperation ? operation : undefined});
+      throw cause;
+    } finally { if (began) activeTransaction = null; }
   }
-  function query(sql, params, method) {
-    const statement = native.prepare(sql);
-    if (method === 'run') { statement.run(...params); return { rows: [] }; }
-    statement.setReturnArrays(true);
-    return { rows: method === 'get' ? statement.get(...params) : statement.all(...params) };
+  /** @param {string} sql @param {any[]} params @param {string} method @param {string} [operation] */
+  function query(sql, params, method, operation) {
+    return statement(operation,() => {
+      const prepared = native.prepare(sql);
+      if (method === 'run') { prepared.run(...params); return { rows: [] }; }
+      prepared.setReturnArrays(true);
+      return { rows: method === 'get' ? prepared.get(...params) : prepared.all(...params) };
+    });
   }
   try {
     if (migrate) transaction(() => {
@@ -49,13 +108,14 @@ export function openDatabase(path, { migrate = true, migrationsDir = process.env
         native.exec(sql);
         native.prepare('INSERT INTO _criterion_migrations (name,checksum) VALUES (?,?)').run(name, checksum);
       }
-    });
+    }, 'database.migrate');
   } catch (error) { native.close(); throw error; }
   return {
     prepare: sql => new Statement(sql),
     // This connection and its transaction callback are synchronous.
     writeTransaction: transaction,
-    batch: statements => transaction(() => statements.map(statement => statement.run())),
+    /** @param {Statement[]} statements @param {string} [operation] */
+    batch: (statements, operation) => transaction(() => statements.map(statement => statement.run()), operation),
     query,
     queryBatch: queries => transaction(() => queries.map(item => query(item.sql, item.params, item.method))),
     close: () => native.close(),

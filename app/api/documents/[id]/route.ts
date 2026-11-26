@@ -70,7 +70,7 @@ export const PATCH = apiRoute('/api/documents/[id]', (req:Request,context:Contex
  doc.updatedAt=at;doc.revision=data.revision+1;
  const saveStart = performance.now();
  diagnostic('document.revision_save_started',{stage:'document_save'});
- const revisionUpdate = db.update(documents).set({body:JSON.stringify(doc),title:doc.title,stage:doc.stage,revision:doc.revision,updatedAt:at,lockToken:null,lockUntil:null,...(usesPaidAI?{aiOperationsUsed:row.aiOperationsUsed+1}:{})}).where(and(eq(documents.id,id),eq(documents.owner,owner),eq(documents.lockToken,lockToken),eq(documents.revision,data.revision),eq(documents.billingState,row.billingState),...(usesPaidAI?[eq(documents.aiOperationsUsed,row.aiOperationsUsed)]:[]))).returning();
+ const revisionUpdate = getDb('document.save_revision').update(documents).set({body:JSON.stringify(doc),title:doc.title,stage:doc.stage,revision:doc.revision,updatedAt:at,lockToken:null,lockUntil:null,...(usesPaidAI?{aiOperationsUsed:row.aiOperationsUsed+1}:{})}).where(and(eq(documents.id,id),eq(documents.owner,owner),eq(documents.lockToken,lockToken),eq(documents.revision,data.revision),eq(documents.billingState,row.billingState),...(usesPaidAI?[eq(documents.aiOperationsUsed,row.aiOperationsUsed)]:[]))).returning();
  let saved: Awaited<typeof revisionUpdate>;
  try {
   saved = await revisionUpdate;

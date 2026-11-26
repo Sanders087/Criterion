@@ -1,5 +1,8 @@
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { databaseFailure } from '../lib/diagnostic-storage.mjs';
+import { startBackupSchedule } from './backup-schedule.mjs';
+import { startStorageMonitor } from '../lib/storage-monitor.mjs';
 import { getDatabase } from '../db/sqlite.mjs';
 import { diagnostic, safeErrorCode, storageSnapshot, integrationConfiguration } from '../lib/diagnostics.mjs';
 
@@ -22,6 +25,8 @@ try {
     const journalMode = database.prepare('PRAGMA journal_mode').first().journal_mode;
     diagnostic('database.ready', { databasePath: actual.file, existedBeforeOpen: beforeOpen?.database.exists ?? null, queryOk, migrationsOk: true, journalMode });
     storageSnapshot(actual.file, 'after_open');
+    startStorageMonitor(actual.file);
+    startBackupSchedule(actual.file);
   } finally {
     database.close();
     delete globalThis[Symbol.for('criterion.sqlite.connection')];
@@ -31,7 +36,8 @@ try {
   diagnostic('site.starting');
   await import(pathToFileURL(resolve(process.argv[2] || '.next/standalone/server.js')).href);
 } catch (error) {
-  diagnostic('startup.failed', { phase, errorCode: safeErrorCode(error) }, 'error');
+  const databaseCode = phase === 'database_open_and_migrations' ? databaseFailure(error)?.errorCode : undefined;
+  diagnostic('startup.failed', { phase, errorCode: databaseCode || safeErrorCode(error) }, 'error');
   console.error('Criterion: site startup failed. Check AUTH_PUBLIC_URL, database permissions and migration files.');
   process.exitCode = 1;
 }
