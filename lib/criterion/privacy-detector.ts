@@ -9,20 +9,25 @@ export type PrivacyEnv = {
  * This endpoint MUST be hosted inside the operator's trusted infrastructure.
  * It receives plaintext; it is never a third-party "cloud anonymizer".
  */
+export function detectorEndpoint(runtime: PrivacyEnv) {
+  const token = runtime.PII_ANALYZER_TOKEN;
+  if (!runtime.PII_ANALYZER_URL || !token || token.length < 32 || /[\r\n]/.test(token)) {
+    throw new PrivacyError('PII_CONFIG_INVALID','detector_request');
+  }
+  let url: URL;
+  try { url = new URL(runtime.PII_ANALYZER_URL); } catch (cause) { throw new PrivacyError('PII_CONFIG_INVALID','detector_request',cause); }
+  const loopback = ['127.0.0.1', '[::1]', 'localhost'].includes(url.hostname);
+  if (url.username || url.password || url.search || url.hash ||
+      url.pathname !== '/analyze' ||
+      !(url.protocol === 'https:' || (loopback && url.protocol === 'http:'))) {
+    throw new PrivacyError('PII_CONFIG_INVALID','detector_request');
+  }
+  return { url, token };
+}
+
 export function trustedDetector(runtime: PrivacyEnv): PiiDetector {
   return async (texts) => {
-    const token = runtime.PII_ANALYZER_TOKEN;
-    if (!runtime.PII_ANALYZER_URL || !token || token.length < 32 || /[\r\n]/.test(token)) {
-      throw new PrivacyError('PII_CONFIG_INVALID','detector_request');
-    }
-    let url: URL;
-    try { url = new URL(runtime.PII_ANALYZER_URL); } catch (cause) { throw new PrivacyError('PII_CONFIG_INVALID','detector_request',cause); }
-    const loopback = ['127.0.0.1', '[::1]', 'localhost'].includes(url.hostname);
-    if (url.username || url.password || url.search || url.hash ||
-        url.pathname !== '/analyze' ||
-        !(url.protocol === 'https:' || (loopback && url.protocol === 'http:'))) {
-      throw new PrivacyError('PII_CONFIG_INVALID','detector_request');
-    }
+    const { url, token } = detectorEndpoint(runtime);
     try {
       const response = await fetch(url, {
         method: 'POST',

@@ -1,18 +1,21 @@
 # Paste into Amvera's Kubernetes probes form; not into amvera.yml.
 startupProbe:
-  exec:
-    command: [node, scripts/run-with-pii.mjs, --healthcheck]
+  httpGet:
+    path: /api/health/ready
+    port: 3000
   periodSeconds: 5
   timeoutSeconds: 6
   failureThreshold: 30
 readinessProbe:
-  exec:
-    command: [node, scripts/run-with-pii.mjs, --healthcheck]
+  httpGet:
+    path: /api/health/ready
+    port: 3000
   periodSeconds: 10
   timeoutSeconds: 6
   failureThreshold: 3
 livenessProbe:
-  tcpSocket:
+  httpGet:
+    path: /api/health/live
     port: 3000
   periodSeconds: 20
   timeoutSeconds: 5
