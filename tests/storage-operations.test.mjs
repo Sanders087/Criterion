@@ -67,6 +67,18 @@ test('rolled back grants never report a committed success or double-count the fa
   } finally { db.close(); }
 });
 
+test('an unsupported nested transaction reports only the outer rollback',()=>{
+  const db = openDatabase(':memory:',{migrate:false});
+  try {
+    const logs = capture(()=>assert.throws(()=>db.writeTransaction(()=>{
+      db.batch([db.prepare('CREATE TABLE nested_example(n INTEGER)')],'auth.issue_email_token');
+    },'auth.create_account')));
+    assert.equal(logs.length,1);assert.equal(logs[0].event,'database.operation_failed');
+    assert.equal(logs[0].operation,'auth.issue_email_token');assert.equal(logs[0].parentOperation,'auth.create_account');
+    assert.equal(logs[0].rolledBack,true);
+  } finally { db.close(); }
+});
+
 test('classifies wrapped extended SQLite codes without parsing any private text',()=>{
   for (const [number,code] of [[6,'DB_LOCKED'],[3,'DB_PERMISSION_DENIED'],[26,'DB_CORRUPT'],[10,'DB_IO_ERROR'],[517,'DB_BUSY']]) {
     const error=Object.assign(new Error('private fixture'),{code:'ERR_SQLITE_ERROR',errcode:number});
