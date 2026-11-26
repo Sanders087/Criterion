@@ -3,22 +3,25 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
-import { diagnostic } from '../lib/diagnostics.mjs';
+import { diagnostic, safeErrorCode } from '../lib/diagnostics.mjs';
 
 const endpoint = 'http://127.0.0.1:8100/analyze';
+function configurationError(code, message) {
+  return Object.assign(new Error(message), { code });
+}
 export function configuration(env = process.env) {
   if (!/^[\x21-\x7e]{32,256}$/.test(env.PII_ANALYZER_TOKEN || '')) {
-    throw new Error('Set PII_ANALYZER_TOKEN to 32–256 printable ASCII characters without spaces.');
+    throw configurationError('PII_TOKEN_CONFIG', 'Set PII_ANALYZER_TOKEN to 32–256 printable ASCII characters without spaces.');
   }
   if (env.PII_ANALYZER_URL && env.PII_ANALYZER_URL !== endpoint) {
-    throw new Error('The shared container requires PII_ANALYZER_URL=' + endpoint);
+    throw configurationError('PII_URL_CONFIG', 'The shared container requires PII_ANALYZER_URL=' + endpoint);
   }
   const port = env.PORT || '3000';
   if (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65535 || Number(port) === 8100) {
-    throw new Error('PORT must be a valid site port other than 8100.');
+    throw configurationError('PORT_CONFIG', 'PORT must be a valid site port other than 8100.');
   }
   const healthPath = env.SITE_HEALTH_PATH || '/';
-  if (!/^\/(?!\/)[a-zA-Z0-9/_-]*$/.test(healthPath)) throw new Error('Invalid SITE_HEALTH_PATH.');
+  if (!/^\/(?!\/)[a-zA-Z0-9/_-]*$/.test(healthPath)) throw configurationError('HEALTH_PATH_CONFIG', 'Invalid SITE_HEALTH_PATH.');
   const siteEnv = { ...env, PORT: port, HOSTNAME: '0.0.0.0', HOST: '0.0.0.0', PII_ANALYZER_URL: endpoint };
   // Do not pass model, database, mail, bank, or provider secrets to Python.
   const piiEnv = Object.fromEntries(['PATH', 'SystemRoot', 'LANG', 'LC_ALL', 'TZ', 'TMP', 'TEMP']
@@ -58,7 +61,7 @@ export async function healthy(config, includeSite = true) {
 export async function supervise(siteCommand, { env = process.env, piiCommand } = {}) {
   const config = configuration(env);
   if (!Array.isArray(siteCommand) || !siteCommand.length || siteCommand.some(x => typeof x !== 'string' || !x)) {
-    throw new Error('Usage: node scripts/run-with-pii.mjs -- node path/to/server.js');
+    throw configurationError('SITE_COMMAND_CONFIG', 'Usage: node scripts/run-with-pii.mjs -- node path/to/server.js');
   }
   const children = [];
   let stopping = false;
@@ -101,8 +104,8 @@ export async function supervise(siteCommand, { env = process.env, piiCommand } =
     });
     children.push(child);
     diagnostic('service.starting', { component: name });
-    child.once('error', () => {
-      diagnostic('service.failed', { component: name, reason: 'spawn_failed' }, 'error');
+    child.once('error', cause => {
+      diagnostic('service.failed', { component: name, reason: 'spawn_failed', causeCode: safeErrorCode(cause) }, 'error');
       console.error('Criterion: failed to start ' + name + '.');
       void stop(1);
     });
@@ -149,8 +152,8 @@ export async function supervise(siteCommand, { env = process.env, piiCommand } =
       void monitor();
     }
     return await done;
-  } catch {
-    console.error('Criterion: startup failed.');
+  } catch (error) {
+    diagnostic('startup.failed', { phase: 'supervisor', errorCode: safeErrorCode(error) }, 'error');
     await stop(1);
     return await done;
   }
@@ -171,7 +174,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       process.exitCode = await supervise(args[0] === '--' ? args.slice(1) : args);
     }
   } catch (error) {
-    console.error(error.message);
+    diagnostic('startup.failed', { phase: 'supervisor', errorCode: error?.code ?? 'UNKNOWN' }, 'error');
     process.exitCode = 1;
   }
 }

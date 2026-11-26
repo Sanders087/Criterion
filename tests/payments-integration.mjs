@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 const fetchMock=createFetchMock();fetchMock.disableNetConnect();
 const terminal='fixtureDEMO',password='!fixture-not-real-Ж$"',cookie='__Host-criterion_session='+'a'.repeat(64),owner='payment-user';
 const receiptEmails=[];const bankPayments=new Map();let initCount=0,checks=0,failAI=false,failInit=false,lostInit=false,unreceivedInit=false,failCheckOrder=false;
-let failDetector=false,modelCalls=0;
+let failDetector=false,modelCalls=0,malformedDenial=false;
 const piiToken='fixture-pii-token-with-at-least-32-characters';
 fetchMock.get('https://pii.test').intercept({path:'/analyze',method:'POST',headers:{authorization:'Bearer '+piiToken}}).reply(200,()=>{
   return JSON.stringify(failDetector?{error:'fixture failure'}:{profile:'ru-contract-v1',offsetUnit:'utf16',spans:[]});
@@ -17,6 +17,7 @@ for(const method of ['Init','GetState','CheckOrder','Cancel'])fetchMock.get('htt
     if(failInit)return JSON.stringify({Success:false,ErrorCode:'999'});
     if(unreceivedInit)return 'invalid-json';
     const payment={TerminalKey:terminal,Success:true,ErrorCode:'0',Amount:19900,OrderId:data.OrderId,PaymentId:String(1000+initCount),Status:'NEW',PaymentURL:'https://securepay.tinkoff.ru/new/'+data.OrderId};bankPayments.set(payment.PaymentId,payment);
+    if(malformedDenial)return JSON.stringify({Success:false,ErrorCode:''});
     return lostInit?'invalid-json':JSON.stringify(payment);
   }
   if(method==='CheckOrder'){if(failCheckOrder)return JSON.stringify({Success:false,ErrorCode:'999'});const payments=[...bankPayments.values()].filter(p=>p.OrderId===data.OrderId);return JSON.stringify(payments.length?{TerminalKey:terminal,Success:true,ErrorCode:'0',OrderId:data.OrderId,Payments:payments}:{Success:false,ErrorCode:'335'})}
@@ -35,7 +36,7 @@ async function request(path,method='GET',body,status=200,headers={}){
   const response=await mf.dispatchFetch('https://criterion.test'+path,{method,headers:{cookie,Origin:'https://criterion.test',...(body?{'content-type':'application/json'}:{}),...headers},body:body?JSON.stringify(body):undefined});
   const data=await response.json();assert.equal(response.status,status,JSON.stringify(data));checks++;return data;
 }
-async function notification(payment,changes={},expected=200){const body={...payment,...changes};delete body.PaymentURL;body.Token=token(body);const response=await mf.dispatchFetch('https://criterion.test/api/payments/tbank/notification',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});assert.equal(response.status,expected,await response.clone().text());if(expected===200)assert.equal(await response.text(),'OK');checks++;}
+async function notification(payment,changes={},expected=200){const body={...payment,...changes};delete body.PaymentURL;body.Token=token(body);const response=await mf.dispatchFetch('https://criterion.test/api/payments/tbank/notification',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});assert.equal(response.status,expected,await response.clone().text());if(expected===200)assert.equal(await response.text(),'OK');checks++;return response.headers.get('X-Request-ID');}
 try{
  const db=mf.database();
   await db.prepare('INSERT INTO accounts(id,email,password_hash,salt,recovery_hash,created_at) VALUES(?,?,?,?,?,?)').bind(owner,'payments@example.test','test','test','test',Date.now()).run();
@@ -57,10 +58,17 @@ try{
   const attempts=await Promise.all([0,1].map(()=>mf.dispatchFetch('https://criterion.test/api/payments/checkout',{method:'POST',headers:{cookie,Origin:'https://criterion.test','content-type':'application/json'},body:JSON.stringify({documentId:doc.id,receiptEmail:"receipt@example.test"})})));
   assert.ok(attempts.every(r=>[200,409].includes(r.status)));assert.ok(attempts.some(r=>r.status===200));assert.equal(initCount,before+1);assert.equal(receiptEmails.at(-1),"receipt@example.test");const initialized=await attempts.find(r=>r.status===200).json();assert.match(initialized.paymentUrl,/securepay/);checks++;
   const payment=[...bankPayments.values()].find(p=>p.OrderId===initialized.paymentUrl.split('/').at(-1));assert.ok(payment);
+  const readEvents=()=>mf.logs().split('\n').filter(line=>line.startsWith('{')).map(line=>JSON.parse(line));
+  const initEvent=readEvents().find(e=>e.event==='payment.transport_completed'&&e.bankMethod==='Init'&&e.operationId==='o_'+payment.OrderId);
+  assert.ok(initEvent?.requestId);
   await request(path,'PATCH',{action:'delete',revision:doc.revision},409);
   const bad={...payment,Status:'CONFIRMED',Token:'0'.repeat(64)};assert.equal((await mf.dispatchFetch('https://criterion.test/api/payments/tbank/notification',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(bad)})).status,403);checks++;
   await notification(payment,{Status:'CONFIRMED',Amount:1},400);await notification(payment,{Status:'CONFIRMED',PaymentId:'999999'},400);
-  await notification(payment,{Status:'AUTHORIZED'});assert.equal((await request(path)).billing.locked,true);
+  const notificationRequestId=await notification(payment,{Status:'AUTHORIZED'});
+  const webhook=readEvents().find(e=>e.event==='operation.completed'&&e.requestId===notificationRequestId);
+  assert.equal(webhook?.operationId,initEvent.operationId);
+  assert.notEqual(notificationRequestId,initEvent.requestId);checks++;
+  assert.equal((await request(path)).billing.locked,true);
   payment.Status='CONFIRMED';await notification(payment,{Amount:'19900'});await notification(payment);await notification(payment,{Status:'AUTHORIZED'});
   doc=await request(path);assert.equal(doc.billing.locked,false);assert.equal(doc.billing.aiRemaining,2);assert.match(JSON.stringify(doc),/PRIVATE-GENERATED/);
   assert.equal((await db.prepare("SELECT COUNT(*) count FROM payment_events WHERE order_id=? AND status='CONFIRMED'").bind(payment.OrderId).first()).count,1);
@@ -82,6 +90,20 @@ try{
   await notification(payment,{Status:'PARTIAL_REFUNDED',Amount:1000});await notification(payment,{Status:'CONFIRMED'});assert.equal((await request(path)).billing.state,'paid');
   await notification(payment,{Status:'REFUNDED'});await notification(payment,{Status:'CONFIRMED'});doc=await request(path);assert.equal(doc.billing.state,'refunded');assert.equal(doc.billing.aiRemaining,0);assert.ok(!JSON.stringify(doc).includes('PRIVATE-'));
   await request(path+'/export?format=docx','GET',undefined,402);await request('/api/payments/checkout','POST',{documentId:doc.id},409);
+  // Bank may accept Init and return a malformed denial. Never reserve a second order in that case.
+  let ambiguous = await request('/api/documents','POST',{kind:'services',mode:'ai'},201);
+  ambiguous = await request('/api/documents/'+ambiguous.id,'PATCH',{action:'generate',revision:0});
+  const beforeAmbiguous = initCount;
+  malformedDenial = true;
+  const ambiguousResult = await request('/api/payments/checkout','POST',{documentId:ambiguous.id},502);
+  malformedDenial = false;
+  assert.equal(ambiguousResult.code,'BANK_RESPONSE_INVALID');
+  await request('/api/payments/checkout','POST',{documentId:ambiguous.id},409);
+  const reservations = await db.prepare('SELECT id,status,active_document FROM payment_orders WHERE document_id=?').bind(ambiguous.id).all();
+  assert.equal(reservations.results.length,1);
+  assert.equal(reservations.results[0].active_document,ambiguous.id);
+  assert.equal(reservations.results[0].status,'INITIALIZING');
+  assert.equal(initCount,beforeAmbiguous+1);checks++;
   // A lost Init response is reconciled by its immutable OrderId, without another Init.
   let second=await request('/api/documents','POST',{kind:'services',mode:'ai'},201);second=await request('/api/documents/'+second.id,'PATCH',{action:'generate',revision:0});lostInit=true;const beforeLost=initCount;
   await request('/api/payments/checkout','POST',{documentId:second.id},502);lostInit=false;

@@ -16,7 +16,7 @@ export function trustedDetector(runtime: PrivacyEnv): PiiDetector {
       throw new PrivacyError();
     }
     let url: URL;
-    try { url = new URL(runtime.PII_ANALYZER_URL); } catch { throw new PrivacyError(); }
+    try { url = new URL(runtime.PII_ANALYZER_URL); } catch (cause) { throw new PrivacyError(cause); }
     const loopback = ['127.0.0.1', '[::1]', 'localhost'].includes(url.hostname);
     if (url.username || url.password || url.search || url.hash ||
         url.pathname !== '/analyze' ||
@@ -54,6 +54,9 @@ export function trustedDetector(runtime: PrivacyEnv): PiiDetector {
       let offset = 0;
       for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
       return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as Detection;
-    } catch { throw new PrivacyError(); }
+    } catch (cause) {
+      if (cause instanceof PrivacyError) throw cause;
+      throw new PrivacyError(cause);
+    }
   };
 }

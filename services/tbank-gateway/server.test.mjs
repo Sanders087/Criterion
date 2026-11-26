@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+import { bankTransport } from './server.mjs';
+import { getRequestContext } from '../../lib/request-context.mjs';
+import { traceInput } from '../../lib/payment-network.mjs';
 import { configuration, createGateway, signature, notificationTransport } from './server.mjs';
 
 const config={secret:'a'.repeat(64),terminal:'1794211361391DEMO',port:8788};
@@ -45,6 +50,87 @@ test('gateway returns a safe error on upstream failure',async()=>{
 test('configuration refuses non-demo terminals and weak credentials',()=>{
   assert.throws(()=>configuration({CRITERION_GATEWAY_SECRET:'a'.repeat(64),CRITERION_DEMO_TERMINAL:'123456'}));
   assert.throws(()=>configuration({CRITERION_GATEWAY_SECRET:'short',CRITERION_DEMO_TERMINAL:config.terminal}));
+});
+
+test('only HMAC-bound trace IDs reach bank processing; a legacy call gets fresh IDs', async () => {
+  const seen = [];
+  const gateway = createGateway(config,async () => {
+    seen.push(getRequestContext());
+    return { Success:true, ErrorCode:'0' };
+  });
+  await new Promise(resolve => gateway.listen(0,'127.0.0.1',resolve));
+  try {
+    const requestId = 'r_'+randomUUID(), operationId = 'o_'+randomUUID();
+    for (const kind of ['signed','tampered','legacy']) {
+      const body = JSON.stringify(fixture), stamp = String(Math.floor(Date.now()/1000)), nonce = randomUUID();
+      const mac = signature(config.secret,stamp,nonce,'Init',body);
+      const trace = createHmac('sha256',Buffer.from(config.secret,'hex')).update(traceInput(mac,requestId,operationId)).digest('hex');
+      const result = await fetch('http://127.0.0.1:'+gateway.address().port+'/bank/Init',{
+        method:'POST',body,headers:{'X-Criterion-Timestamp':stamp,'X-Criterion-Nonce':nonce,'X-Criterion-Signature':mac,
+          ...(kind==='legacy' ? {} : {'X-Request-ID':requestId,'X-Operation-ID':kind==='signed' ? operationId : 'o_'+randomUUID(),
+            'X-Criterion-Trace-Signature':trace})},
+      });
+      assert.equal(result.status,200);
+    }
+    assert.equal(seen[0].requestId,requestId);
+    assert.equal(seen[0].operationId,operationId);
+    for (const local of seen.slice(1)) {
+      assert.notEqual(local.requestId,requestId);
+      assert.notEqual(local.operationId,operationId);
+    }
+  } finally { await new Promise(resolve => gateway.close(resolve)); }
+});
+
+function simulatedTransport({reused=false, response='ok', status=200, connectMs=200, totalMs=500} = {}) {
+  const socket = Object.assign(new EventEmitter(), {remoteFamily:'IPv6', connecting:!reused, encrypted:true});
+  const request = new EventEmitter();
+  request.reusedSocket = reused;
+  request.destroy = error => { request.destroyed = true; request.emit('error',error); };
+  const send = (_url,_options,headers) => {
+    request.end = () => queueMicrotask(() => {
+      request.emit('socket',socket);
+      if (response === 'hang-connect') return;
+      if (!reused) for (const name of ['lookup','connect','secureConnect']) socket.emit(name);
+      const stream = new PassThrough();
+      stream.statusCode = status;
+      headers(stream);
+      if (response==='slow') return;
+      if (response==='truncated') stream.emit('aborted');
+      else stream.end(response==='ok' ? '{"Success":true,"ErrorCode":"0"}' : response);
+    });
+    return request;
+  };
+  return { send:bankTransport({send,agent:false,connectMs,totalMs}),request,socket };
+}
+
+test('fresh and reused socket timings distinguish unobserved phases', async () => {
+  for (const reused of [false,true]) {
+    const timings = {}, transport = simulatedTransport({reused});
+    await transport.send('Init','{}',timings);
+    assert.equal(timings.connectionReused,reused);
+    assert.equal(timings.addressFamily,'IPv6');
+    for (const field of ['dnsDurationMs','tcpDurationMs','tlsDurationMs']) {
+      if (reused) assert.equal(timings[field],undefined);
+      else assert.ok(timings[field]>=0,field);
+    }
+    assert.ok(timings.ttfbMs>=0 && timings.responseReadDurationMs>=0);
+    for (const event of ['lookup','connect','secureConnect']) assert.equal(transport.socket.listenerCount(event),0);
+  }
+});
+
+test('connect deadline, overall timeout, interrupted body, HTTP error and malformed bank reply have distinct outcomes', async () => {
+  const cases = [
+    [{response:'hang-connect',connectMs:10}, 'BANK_CONNECT_TIMEOUT'],
+    [{response:'slow',totalMs:15}, 'BANK_TIMEOUT'],
+    [{response:'truncated'}, 'BANK_RESPONSE_INTERRUPTED'],
+    [{status:503}, 'BANK_HTTP_ERROR'],
+    [{response:'{}'}, 'BANK_RESPONSE_INVALID'],
+  ];
+  for (const [options,code] of cases) {
+    const transport = simulatedTransport(options);
+    await assert.rejects(transport.send('GetState','{}'), {code});
+    if (code.endsWith('TIMEOUT')) assert.equal(transport.request.destroyed,true);
+  }
 });
 
 const liveEnv={CRITERION_MODE:'live',CRITERION_GATEWAY_SECRET:'c'.repeat(64),CRITERION_LIVE_TERMINAL:'123456789',CRITERION_SITE_ORIGIN:'https://criterion-publish-diagnostic-20261113.serenewisteria2.chatgpt.site',CRITERION_SITE_TOKEN:'fixture-access-token-'.repeat(4),PORT:'8789'};

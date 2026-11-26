@@ -22,9 +22,13 @@ curl --fail --silent --show-error --location --proto '=https' --proto-redir '=ht
 printf '%s  %s\n' '5b8cb7faf8726a2028ad96a66e54e6e81e8f361bc6175e5d22bbd997cc5177fb' "$stage/caddy.tar.gz" | sha256sum --check --status
 tar --no-same-owner -xzf "$stage/caddy.tar.gz" -C "$target" caddy
 chmod 755 "$target/caddy"
-install -m 644 "$stage/server.mjs" "$stage/Caddyfile" "$target/"
+install -d -m 755 "$target/services/tbank-gateway" "$target/lib"
+install -m 644 "$stage/server.mjs" "$target/services/tbank-gateway/server.mjs"
+install -m 644 "$stage/lib/"{diagnostics,diagnostic-schema,request-context,payment-network}.mjs "$target/lib/"
+ln -s ../../certs "$target/services/tbank-gateway/certs"
+install -m 644 "$stage/Caddyfile" "$target/"
 install -m 644 "$stage/certs/"*.crt "$target/certs/"
-"$target/runtime/bin/node" --check "$target/server.mjs"
+"$target/runtime/bin/node" --input-type=module -e 'await import(process.argv[1])' "$target/services/tbank-gateway/server.mjs"
 "$target/caddy" validate --config "$target/Caddyfile" --adapter caddyfile
 
 for name in criterion-tbank criterion-tbank-proxy; do

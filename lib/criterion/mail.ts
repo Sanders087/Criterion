@@ -1,3 +1,4 @@
+import { AppError } from './app-error.ts';
 import {z} from 'zod';
 export type MailConfig = {RESEND_API_KEY?:string;EMAIL_FROM?:string;EMAIL_REPLY_TO?:string;AUTH_PUBLIC_URL?:string};
 const replyToSchema=z.string().email().max(254);
@@ -16,11 +17,22 @@ export function authMessage(purpose:'verify'|'reset',origin:string,token:string,
  const ifIgnored=purpose==='verify'?'Если вы не регистрировались в Criterion, просто проигнорируйте это письмо.':'Если вы не запрашивали сброс, просто проигнорируйте письмо — ваш пароль останется прежним.';
  return {subject:title,text:`${context}\n\n${instruction}\n\n${link.href}\n\nСсылка действует ${ttl} и используется один раз. ${ifIgnored} Никому не пересылайте ссылку.\n\nCriterion`};
 }
+function deliveryError(stage: 'configuration' | 'provider_request' | 'provider_response', cause?: unknown, upstreamStatus?: number) {
+ return new AppError({status:503, code:'MAIL_SEND_FAILED', publicMessage:'Не удалось отправить письмо. Повторите позже.',
+  service:'mail', stage, cause, upstreamStatus, retryable:false});
+}
 export async function sendAuthMail(config:MailConfig,to:string,purpose:'verify'|'reset',token:string,idempotencyKey:string,transport:typeof fetch=fetch){
- if(!mailReady(config))throw new Error('MAIL_NOT_CONFIGURED');
+ if(!mailReady(config))throw deliveryError('configuration');
  const message=authMessage(purpose,config.AUTH_PUBLIC_URL!,token,to),replyTo=config.EMAIL_REPLY_TO?.trim();
- const response=await transport('https://api.resend.com/emails',{method:'POST',headers:{Authorization:`Bearer ${config.RESEND_API_KEY}`,'Content-Type':'application/json','Idempotency-Key':idempotencyKey},body:JSON.stringify({from:config.EMAIL_FROM,to:[to],...(replyTo?{reply_to:replyTo}:{}),...message}),signal:AbortSignal.timeout(12000)});
- if(!response.ok)throw new Error('MAIL_PROVIDER_REJECTED');
- const result=await response.json() as {id?:string};if(!result.id)throw new Error('MAIL_PROVIDER_INVALID_RESPONSE');
+ let response: Response;
+ try { response=await transport('https://api.resend.com/emails',{method:'POST',headers:{Authorization:`Bearer ${config.RESEND_API_KEY}`,'Content-Type':'application/json','Idempotency-Key':idempotencyKey},body:JSON.stringify({from:config.EMAIL_FROM,to:[to],...(replyTo?{reply_to:replyTo}:{}),...message}),signal:AbortSignal.timeout(12000)});
+ } catch(cause) { throw deliveryError('provider_request',cause); }
+ if(!response.ok){
+  await response.body?.cancel().catch(() => {});
+  throw deliveryError('provider_response',undefined,response.status);
+ }
+ let result: {id?:string};
+ try { result=await response.json(); } catch(cause) { throw deliveryError('provider_response',cause,response.status); }
+ if(typeof result?.id !== 'string' || !result.id)throw deliveryError('provider_response',undefined,response.status);
  return result.id;
 }

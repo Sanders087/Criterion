@@ -1,3 +1,4 @@
+import {AppError} from '../lib/criterion/app-error.ts';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {authMessage,mailReady,sendAuthMail} from '../lib/criterion/mail.ts';
@@ -37,8 +38,8 @@ test('invalid or newline-containing Reply-To disables mail before contacting the
  let calls=0;const transport=(async()=>{calls++;return Response.json({id:'unexpected'})}) as typeof fetch;
  for(const value of ['not-an-email','Support <support@example.com>','support@example.com,other@example.com','support@example.com\r\nBcc: other@example.com','support@example.com\n','\r\n','a'.repeat(255)+'@example.com']){
   const mailConfig={...config,EMAIL_REPLY_TO:value};assert.equal(mailReady(mailConfig),false,value);
-  await assert.rejects(sendAuthMail(mailConfig,'recipient@example.com','reset','b'.repeat(64),'request-1',transport),/MAIL_NOT_CONFIGURED/);
+  await assert.rejects(sendAuthMail(mailConfig,'recipient@example.com','reset','b'.repeat(64),'request-1',transport),error => error instanceof AppError && error.code === 'MAIL_SEND_FAILED' && error.stage === 'configuration');
  }
  assert.equal(calls,0);
 });
-test('provider failure is not reported as delivery success',async()=>{await assert.rejects(sendAuthMail(config,'recipient@example.com','reset','b'.repeat(64),'request-1',(async()=>new Response('denied',{status:403})) as typeof fetch),/MAIL_PROVIDER_REJECTED/)});
+test('provider failure is not reported as delivery success',async()=>{await assert.rejects(sendAuthMail(config,'recipient@example.com','reset','b'.repeat(64),'request-1',(async()=>new Response('denied',{status:403})) as typeof fetch),error => error instanceof AppError && error.stage === 'provider_response' && error.upstreamStatus === 403 && !error.publicMessage.includes('denied'))});

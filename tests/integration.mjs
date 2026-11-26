@@ -12,8 +12,7 @@ async function request(path,method='GET',body,owner='qa-owner',expected=200,extr
 try{
  const health=await (await mf.dispatchFetch('https://criterion.test/api/health')).json();
  assert.deepEqual(health,{status:'ready'});checks++;
- const prefix='Criterion diagnostics v2: ';
- const events=mf.logs().split('\n').filter(line=>line.startsWith(prefix)).map(line=>JSON.parse(line.slice(prefix.length)));
+ const events=mf.logs().split('\n').filter(line=>line.startsWith('{')).map(line=>JSON.parse(line));
  const ready=events.find(event=>event.event==='database.ready');
  assert.equal(ready.queryOk,true);assert.equal(ready.existedBeforeOpen,true);assert.equal(ready.migrationsOk,true);
  assert.ok(ready.databasePath.endsWith('test.sqlite'));

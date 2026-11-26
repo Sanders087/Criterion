@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createHash,createHmac} from 'node:crypto';
-import {bankToken,verifyBankToken,initParameters,checkoutReady,paymentUrl,bankRequest,bankConfig} from '../lib/criterion/tbank.ts';
+import {createHash,createHmac,randomUUID} from 'node:crypto';
+import {runTrustedContext} from '../lib/request-context.mjs';
+import {retryableRead,traceInput} from '../lib/payment-network.mjs';
+import {DatabaseSync} from 'node:sqlite';
+import {PaymentError,withPaymentOrder,bankToken,verifyBankToken,initParameters,checkoutReady,paymentUrl,bankRequest,bankConfig} from '../lib/criterion/tbank.ts';
 import {presentContract} from '../lib/criterion/billing.ts';
 import {demoContract} from '../lib/criterion/domain.ts';
 const env={TBANK_ENABLED:'true',TBANK_TERMINAL_KEY:'fixtureDEMO',TBANK_PASSWORD:'fixture-password',TBANK_PUBLIC_URL:'https://criterion.test',TBANK_RECEIPT_MODE:'bank',TBANK_TAXATION:'usn_income',TBANK_TAX:'none',TBANK_PAYMENT_METHOD:'full_payment',TBANK_PAYMENT_OBJECT:'intellectual_activity'};
@@ -68,6 +71,98 @@ test('VPS transport signs the exact body without disclosing the bank password',a
   assert.deepEqual(await bankRequest(gateway,'CheckOrder',{OrderId:'fixture'}),{Success:true,ErrorCode:'0'});
   for(const changes of [{TBANK_GATEWAY_URL:'https://example.com/criterion-tbank/'},{TBANK_GATEWAY_SECRET:'short'},{TBANK_TERMINAL_KEY:'123456'},{TBANK_API_URL:'https://rest-api-test.tinkoff.ru/v2/'}])assert.throws(()=>bankConfig({...gateway,...changes}));
 });
+test('payment order error retains the original SQLite failure and order ID after its async scope ends',async()=>{
+  const orderId=randomUUID(),db=new DatabaseSync(':memory:');
+  let original:unknown;
+  try {
+    await assert.rejects(withPaymentOrder(orderId,async()=>{
+      try { db.prepare('SELECT * FROM missing_fixture_table').get(); }
+      catch(cause){ original=cause; throw cause; }
+    }),error=>{
+      assert.ok(error instanceof Error);
+      assert.equal((error as {code?:string}).code,'DATABASE_ERROR');
+      assert.equal((error as {operationId?:string}).operationId,'o_'+orderId);
+      assert.equal(error.cause,original);
+      return true;
+    });
+    let typed:PaymentError|undefined;
+    await assert.rejects(withPaymentOrder(orderId,async()=>{
+      typed=new PaymentError(409,'Уточняется статус оплаты.');
+      throw typed;
+    }),error=>error===typed);
+  } finally { db.close(); }
+});
+
+test('site forwards authenticated trace headers only to configured gateway',async t=>{
+  const context={requestId:'r_'+randomUUID(),operationId:'o_'+randomUUID()};
+  const gateway={...env,TBANK_GATEWAY_URL:'https://srv678677.hstgr.cloud/criterion-tbank/',TBANK_GATEWAY_SECRET:'c'.repeat(64)};
+  t.mock.method(globalThis,'fetch',async(url:string,options:RequestInit)=>{
+    const headers=options.headers as Record<string,string>;
+    if (url.startsWith(gateway.TBANK_GATEWAY_URL)) {
+      assert.equal(headers['X-Request-ID'],context.requestId);
+      assert.equal(headers['X-Operation-ID'],context.operationId);
+      assert.equal(headers['X-Criterion-Trace-Signature'],createHmac('sha256',Buffer.from(gateway.TBANK_GATEWAY_SECRET,'hex'))
+        .update(traceInput(headers['X-Criterion-Signature'],context.requestId,context.operationId)).digest('hex'));
+    } else {
+      assert.equal(headers['X-Request-ID'],undefined);
+      assert.equal(headers['X-Criterion-Trace-Signature'],undefined);
+    }
+    return Response.json({Success:true,ErrorCode:'0'});
+  });
+  await runTrustedContext(context,async()=>{
+    await bankRequest(gateway,'CheckOrder',{OrderId:'fixture'});
+    await bankRequest(env,'CheckOrder',{OrderId:'fixture'});
+  });
+});
+
+test('automatic retry advice applies only to read methods and known transient failures',()=>{
+  assert.equal(retryableRead('GetState','GATEWAY_HTTP_ERROR',403),false);
+  assert.equal(retryableRead('GetState','GATEWAY_HTTP_ERROR',503),true);
+  assert.equal(retryableRead('CheckOrder','BANK_TLS_ERROR',undefined),false);
+  assert.equal(retryableRead('CheckOrder','BANK_REQUEST_REJECTED',200),false);
+  for(const method of ['Init','Cancel'])assert.equal(retryableRead(method,'BANK_TIMEOUT',undefined),false);
+});
+
+test('bank envelopes distinguish a documented error code from an ambiguous Init response', async () => {
+  const { validBankEnvelope } = await import('../lib/payment-network.mjs');
+  for (const code of ['335', 335, '-948', -948]) assert.equal(validBankEnvelope({Success:false,ErrorCode:code}), true);
+  for (const code of [null, '', ' ', '0', 0, '00', '0 ', '1\n', '-0', 'text', {}, 1.5]) {
+    assert.equal(validBankEnvelope({Success:false,ErrorCode:code}), false);
+  }
+});
+
+test('site classifies gateway failures, preserves nested cause and never retries Init', async t => {
+  const gateway={...env,TBANK_GATEWAY_URL:'https://srv678677.hstgr.cloud/criterion-tbank/',TBANK_GATEWAY_SECRET:'c'.repeat(64)};
+  let reply:Response|undefined, thrown:Error = new Error();
+  let calls = 0;
+  t.mock.method(globalThis,'fetch',async()=>{ calls++; if (reply) return reply; throw thrown; });
+  for (const [low,code] of [
+    ['ENOTFOUND','GATEWAY_DNS_ERROR'],['ECONNREFUSED','GATEWAY_CONNECTION_REFUSED'],
+    ['UND_ERR_CONNECT_TIMEOUT','GATEWAY_CONNECT_TIMEOUT'],['CERT_HAS_EXPIRED','GATEWAY_TLS_ERROR'],
+    ['UND_ERR_HEADERS_TIMEOUT','GATEWAY_TIMEOUT'],['unrecognized','GATEWAY_NETWORK_ERROR'],
+  ]) {
+    thrown=new TypeError('fixture site error',{cause:Object.assign(new Error('secret-fixture'),{code:low})});
+    await assert.rejects(bankRequest(gateway,'Init',{}),error=>{
+      assert.equal((error as {code:string}).code,code);
+      assert.equal((error as Error).cause,thrown);
+      assert.equal((error as {retryable:boolean}).retryable,false);
+      return true;
+    });
+  }
+  for (const [response,code] of [
+    [new Response('secret',{status:503}), 'GATEWAY_HTTP_ERROR'],
+    [new Response('secret',{status:502,headers:{'X-Criterion-Bank-Error':'BANK_TIMEOUT'}}), 'BANK_TIMEOUT'],
+    [new Response('secret',{status:502,headers:{'X-Criterion-Bank-Error':'untrusted'}}), 'GATEWAY_HTTP_ERROR'],
+    [Response.json({}), 'GATEWAY_RESPONSE_INVALID'],
+  ] as const) {
+    reply=response;
+    await assert.rejects(bankRequest(gateway,'Init',{}),{code,retryable:false});
+  }
+  const before=calls;
+  await assert.rejects(bankRequest(gateway,'Cancel',{},performance.now()-5),{code:'GATEWAY_TIMEOUT',retryable:false});
+  assert.equal(calls,before);
+});
+
 test('Bank token includes false/zero, excludes nested objects and incoming Token/Password',async()=>{
   const data={TerminalKey:'terminal',Amount:0,Success:false,OrderId:'abc',DATA:{Phone:'private'},Receipt:{Items:[]},Token:'ignored',Password:'attacker'};
   const expected=createHash('sha256').update('0abcsecretfalseterminal').digest('hex');
@@ -82,7 +177,8 @@ test('Price/receipt/redirects are server controlled and checkout fails closed wi
   assert.equal(data.SuccessURL,'https://criterion.test/?document=document&payment=success');
   assert.equal(data.FailURL,'https://criterion.test/?document=document&payment=fail');
   assert.equal(data.NotificationURL,'https://criterion.test/api/payments/tbank/notification');
-  assert.equal((data.Receipt as any).Items[0].Amount,19900);assert.equal((data.Receipt as any).Email,'qa@example.test');
+  const receipt=data.Receipt as {Items:Array<{Amount:number}>;Email:string};
+  assert.equal(receipt.Items[0].Amount,19900);assert.equal(receipt.Email,'qa@example.test');
   assert.equal(checkoutReady({...env,TBANK_RECEIPT_MODE:undefined}),false);
   assert.equal(checkoutReady({...env,TBANK_PUBLIC_URL:'https://evil.test/?redirect=1'}),false);
   assert.equal(checkoutReady({...env,TBANK_ENABLED:'false'}),false);

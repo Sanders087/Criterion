@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 const image = process.env.CRITERION_TEST_IMAGE || 'criterion:docker';
@@ -31,9 +32,21 @@ try {
   }
   await ready();
   const rawLogs=docker(['logs',name]);
-  const prefix='Criterion diagnostics v2: ';
-  const events=(rawLogs.stdout+'\n'+rawLogs.stderr).split('\n').filter(line=>line.startsWith(prefix)).map(line=>JSON.parse(line.slice(prefix.length)));
-  assert.ok(events.some(e=>e.event==='storage.entrypoint'&&e.phase==='before_permissions'));
+  const events=(rawLogs.stdout+'\n'+rawLogs.stderr).split('\n').filter(line=>line.startsWith('{')).map(line=>JSON.parse(line));
+  const bootstrap = events.find(e => e.event === 'storage.entrypoint' && e.phase === 'before_permissions');
+  assert.ok(bootstrap);
+  for (const expected of ['level=info', 'service=criterion', 'databasePath=/data/criterion.sqlite',
+    'directory.uid=' + bootstrap.directory.uid, 'directory.mode=' + bootstrap.directory.mode]) {
+    assert.ok(bootstrap.message.split(' ').includes(expected));
+  }
+  // A startup that fails before Node runs must still expose a safe OS error number in the viewer.
+  const failed = docker(['run', '--rm', '--network', 'none', '--read-only', '--tmpfs', '/data', image, '/missing-test-command'], false);
+  assert.equal(failed.status, 1);
+  const failure = failed.stderr.split('\n').filter(line => line.startsWith('{')).map(line => JSON.parse(line))
+    .find(e => e.event === 'entrypoint.failed');
+  assert.equal(failure.errno, 2);
+  assert.ok(failure.message.includes('errno=2'));
+  assert.doesNotMatch(failure.message, /missing-test-command/);
   const storage=events.find(e=>e.event==='storage.snapshot'&&e.phase==='after_open');
   assert.equal(storage.databasePath,'/data/criterion.sqlite');
   assert.equal(storage.mount.mountPoint,'/data');assert.equal(storage.mount.separateMount,true);
@@ -51,6 +64,18 @@ try {
   console.log(docker(['exec', name, 'node', '/test/container-client.mjs', '--persisted']).stdout.trim());
   docker(['stop', '--time', '15', name]);
   assert.equal(docker(['inspect', '--format', '{{.State.ExitCode}}', name]).stdout.trim(), '0');
+  const combined = docker(['logs', name]);
+  const transcript = combined.stdout + '\n' + combined.stderr;
+  const synthetic = JSON.parse(readFileSync(new URL('./fixtures/pii-office-services-case.json', import.meta.url), 'utf8'));
+  assert.equal(synthetic.syntheticOnly, true);
+  // Four-digit passport series alone can occur in random request IDs. Check them in context.
+  const markers = [
+    'docker@example.test', 'Synthetic-Docker-Password-2026', env.PII_ANALYZER_TOKEN, 'CRITERION_PII',
+    synthetic.text.split('\n')[0], ...synthetic.text.match(/серия \d+, номер \d+/gu),
+    ...synthetic.sensitive.map(span => span.text).filter(value => !/^\d{1,8}$/.test(value)),
+  ];
+  for (const marker of markers) assert.ok(!transcript.includes(marker), 'Synthetic private data in runtime logs');
+  console.log('Combined site, supervisor and detector logs contain no synthetic account, contract or PII markers.');
   console.log('Container SIGTERM exit=0; test network disabled; all runtime processes run without root.');
 } catch (error) {
   if (created) {
