@@ -23,7 +23,7 @@ export function apiRoute<Args extends unknown[]>(route: string,
     } catch (cause) {
       const error = normalizeError(cause);
       const level = error.status >= 500 ? 'error' : error.status === 429 ? 'warn' : 'info';
-      logFailure('http.request_failed', error, { method, httpStatus: error.status,
+      logFailure('http.request_failed', error, { method, httpStatus: error.status, operationDurationMs: error.operationDurationMs,
         durationMs: Math.round(performance.now() - started) }, level);
       return Response.json({ error: error.publicMessage, code: error.code, requestId,
         ...(route === '/api/health' ? { status: 'unavailable' } : {}) }, {

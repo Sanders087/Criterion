@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 const image = process.env.CRITERION_TEST_IMAGE || 'criterion:docker';
@@ -50,6 +51,18 @@ try {
   console.log(docker(['exec', name, 'node', '/test/container-client.mjs', '--persisted']).stdout.trim());
   docker(['stop', '--time', '15', name]);
   assert.equal(docker(['inspect', '--format', '{{.State.ExitCode}}', name]).stdout.trim(), '0');
+  const combined = docker(['logs', name]);
+  const transcript = combined.stdout + '\n' + combined.stderr;
+  const synthetic = JSON.parse(readFileSync(new URL('./fixtures/pii-office-services-case.json', import.meta.url), 'utf8'));
+  assert.equal(synthetic.syntheticOnly, true);
+  // Four-digit passport series alone can occur in random request IDs. Check them in context.
+  const markers = [
+    'docker@example.test', 'Synthetic-Docker-Password-2026', env.PII_ANALYZER_TOKEN, 'CRITERION_PII',
+    synthetic.text.split('\n')[0], ...synthetic.text.match(/серия \d+, номер \d+/gu),
+    ...synthetic.sensitive.map(span => span.text).filter(value => !/^\d{1,8}$/.test(value)),
+  ];
+  for (const marker of markers) assert.ok(!transcript.includes(marker), 'Synthetic private data in runtime logs');
+  console.log('Combined site, supervisor and detector logs contain no synthetic account, contract or PII markers.');
   console.log('Container SIGTERM exit=0; test network disabled; all runtime processes run without root.');
 } catch (error) {
   if (created) {

@@ -45,6 +45,9 @@ test('HTTP replies and terminal logs correlate under concurrency without echoing
   assert.equal(failed[0].requestId, ids[1]);
   assert.equal(failed[0].route, '/api/documents/[id]');
   assert.equal(failed[0].causeCode, 'ENOTFOUND');
+  assert.ok(Number.isInteger(failed[0].operationDurationMs) && failed[0].operationDurationMs >= 0);
+  // The handler waited before entering the operation. Its full duration must include that time.
+  assert.ok(failed[0].durationMs > failed[0].operationDurationMs);
   const op = events.find(e => e.event === 'operation.started');
   assert.match(op.operationId, /^o_[0-9a-f-]{36}$/);
   assert.equal(op.operationId, failed[0].operationId);
