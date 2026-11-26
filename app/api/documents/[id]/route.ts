@@ -1,3 +1,5 @@
+import { diagnostic } from '../../../../lib/diagnostics.mjs';
+import { runOperation } from '../../../../lib/request-context.mjs';
 import { observeOperation, reportSuppressed } from '../../../../lib/criterion/api-observability';
 import { AppError } from '../../../../lib/criterion/app-error';
 import { z } from 'zod';
@@ -7,11 +9,12 @@ import { documents } from '../../../../db/schema';
 import { identity,json,apiDefaults, apiRoute,readBody,runtime,getMaterials,unpack,HttpError } from '../../../../lib/criterion/server';
 import { draftTemplate,review,snapshot,fields,type Contract } from '../../../../lib/criterion/domain';
 import { interview,generate,mergeFacts,reviewAI } from '../../../../lib/criterion/ai';
+import { presentPaymentDocument } from '../../../../lib/criterion/payments';
 import { presentContract,hasAccess,INCLUDED_AI_OPERATIONS } from '../../../../lib/criterion/billing';
 const schema=z.object({action:z.enum(['save','message','generate','revise','edit','review','finalize','reopen','restore','delete']),revision:z.number().int().nonnegative(),facts:z.record(z.string().max(6000)).optional(),context:z.string().max(15000).optional(),text:z.string().min(1).max(12000).optional(),title:z.string().min(1).max(160).optional(),sections:z.array(z.object({id:z.string().min(1).max(100),title:z.string().min(1).max(200),content:z.string().max(18000)})).min(3).max(30).optional(),version:z.number().int().positive().optional(),acknowledge:z.boolean().optional()});
 type Context={params:Promise<{id:string}>};
-export const GET = apiRoute('/api/documents/[id]', async (_req:Request,context:Context) => {const user=await identity();const {id}=await context.params;const [row]=await getDb().select().from(documents).where(and(eq(documents.id,id),eq(documents.owner,user.userId)));if(!row)throw new HttpError(404,'Документ не найден.');return json(presentContract(row))});
-export const PATCH = apiRoute('/api/documents/[id]', async (req:Request,context:Context) => {let lockToken:string|undefined;let id='';let owner='';try{
+export const GET = apiRoute('/api/documents/[id]', async (_req:Request,context:Context) => {const user=await identity();const {id}=await context.params;const [row]=await getDb().select().from(documents).where(and(eq(documents.id,id),eq(documents.owner,user.userId)));if(!row)throw new HttpError(404,'Документ не найден.');return json(await presentPaymentDocument(row,user.userId))});
+export const PATCH = apiRoute('/api/documents/[id]', (req:Request,context:Context) => runOperation(async () => {let lockToken:string|undefined;let id='';let owner='';try{
  const user=await identity();owner=user.userId;id=(await context.params).id;const data=schema.parse(await readBody(req));const db=getDb();
  const [row]=await db.select().from(documents).where(and(eq(documents.id,id),eq(documents.owner,owner)));if(!row)throw new HttpError(404,'Документ не найден.');
  if(row.revision!==data.revision)throw new HttpError(409,'Документ изменён в другой вкладке. Откройте его заново, чтобы не потерять изменения.');
@@ -65,9 +68,22 @@ export const PATCH = apiRoute('/api/documents/[id]', async (req:Request,context:
  }
  if(doc.versions.length>80)throw new HttpError(400,'Достигнут лимит 80 версий. Скачайте документ и создайте новую сессию.');
  doc.updatedAt=at;doc.revision=data.revision+1;
- const saved=await db.update(documents).set({body:JSON.stringify(doc),title:doc.title,stage:doc.stage,revision:doc.revision,updatedAt:at,lockToken:null,lockUntil:null,...(usesPaidAI?{aiOperationsUsed:row.aiOperationsUsed+1}:{})}).where(and(eq(documents.id,id),eq(documents.owner,owner),eq(documents.lockToken,lockToken),eq(documents.revision,data.revision),eq(documents.billingState,row.billingState),...(usesPaidAI?[eq(documents.aiOperationsUsed,row.aiOperationsUsed)]:[]))).returning();
- if(!saved.length)throw new HttpError(409,'Документ был обновлён параллельно. Откройте последнюю версию.');
+ const saveStart = performance.now();
+ diagnostic('document.revision_save_started',{stage:'document_save'});
+ const revisionUpdate = db.update(documents).set({body:JSON.stringify(doc),title:doc.title,stage:doc.stage,revision:doc.revision,updatedAt:at,lockToken:null,lockUntil:null,...(usesPaidAI?{aiOperationsUsed:row.aiOperationsUsed+1}:{})}).where(and(eq(documents.id,id),eq(documents.owner,owner),eq(documents.lockToken,lockToken),eq(documents.revision,data.revision),eq(documents.billingState,row.billingState),...(usesPaidAI?[eq(documents.aiOperationsUsed,row.aiOperationsUsed)]:[]))).returning();
+ let saved: Awaited<typeof revisionUpdate>;
+ try {
+  saved = await revisionUpdate;
+  if (!saved.length) throw new AppError({code:'DOCUMENT_SAVE_FAILED',status:409,publicMessage:'Документ был обновлён параллельно. Откройте последнюю версию.',
+   service:'database',stage:'document_save',retryable:false});
+  diagnostic('document.revision_saved',{stage:'document_save',durationMs:Math.round(performance.now()-saveStart)});
+ } catch (cause) {
+  diagnostic('document.revision_save_failed',{stage:'document_save',errorCode:'DOCUMENT_SAVE_FAILED',durationMs:Math.round(performance.now()-saveStart)},'error');
+  if (cause instanceof AppError) throw cause;
+  throw new AppError({code:'DOCUMENT_SAVE_FAILED',status:500,publicMessage:'Не удалось сохранить новую версию договора. Проверьте состояние документа.',
+   service:'database',stage:'document_save',cause,retryable:false});
+ }
  return json(presentContract(saved[0]));
-}finally{if(lockToken&&id&&owner)try{await getDb().update(documents).set({lockToken:null,lockUntil:null}).where(and(eq(documents.id,id),eq(documents.owner,owner),eq(documents.lockToken,lockToken)))}catch(cause){reportSuppressed(new AppError({code:'CLEANUP_FAILED', status:500, publicMessage:'Не удалось освободить блокировку документа.', service:'database', stage:'cleanup', cause}));}}});
+}finally{if(lockToken&&id&&owner)try{await getDb().update(documents).set({lockToken:null,lockUntil:null}).where(and(eq(documents.id,id),eq(documents.owner,owner),eq(documents.lockToken,lockToken)))}catch(cause){reportSuppressed(new AppError({code:'CLEANUP_FAILED', status:500, publicMessage:'Не удалось освободить блокировку документа.', service:'database', stage:'cleanup', cause}));}}}));
 
 export const { POST, PUT, DELETE, OPTIONS } = apiDefaults('/api/documents/[id]', ['GET', 'PATCH']);

@@ -16,7 +16,19 @@ export const paymentOrders = sqliteTable('payment_orders', {
   paymentId: text('payment_id'), paymentUrl: text('payment_url'), status: text('status').notNull(),
   statusRank: integer('status_rank').notNull().default(0), createdAt: integer('created_at').notNull(), updatedAt: integer('updated_at').notNull(),
   checkedAt: integer('checked_at').notNull().default(0),
+  firstMissingAt: integer('first_missing_at').notNull().default(0), cancelRequestedAt: integer('cancel_requested_at').notNull().default(0),
 }, t => [uniqueIndex('payment_orders_active_document').on(t.activeDocument), uniqueIndex('payment_orders_payment_id').on(t.paymentId), index('payment_orders_document').on(t.documentId)]);
 export const paymentEvents = sqliteTable('payment_events', {
   id: text('id').primaryKey(), orderId: text('order_id').notNull(), status: text('status').notNull(), amount: integer('amount').notNull(), createdAt: integer('created_at').notNull(),
 }, t => [uniqueIndex('payment_events_once').on(t.orderId,t.status,t.amount)]);
+
+// Delivery attempts outlive single-use tokens and never store recipients or token hashes.
+export const mailAttempts = sqliteTable('mail_attempts', {
+  operationId: text('operation_id').primaryKey(),
+  mailType: text('mail_type').notNull(),
+  providerMessageId: text('provider_message_id'),
+  status: text('status').notNull(),
+  errorCode: text('error_code'),
+  createdAt: integer('created_at').notNull(),
+  updatedAt: integer('updated_at').notNull(),
+}, table => [index('mail_attempts_created_at').on(table.createdAt)]);

@@ -51,7 +51,7 @@ export async function createTestApp({ bindings = {}, fetchMock = createFetchMock
     if (message?.type !== 'fetch') return;
     let result;
     try { result = await fetchMock.dispatch(message); }
-    catch (error) { result = { error: error.message }; }
+    catch (error) { result = { error: error.message, timeout: error.name === 'TimeoutError' }; }
     if (child.connected) child.send({ type: 'fetch-result', id: message.id, ...result });
   });
   async function dispose() {

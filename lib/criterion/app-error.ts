@@ -23,6 +23,7 @@ export class AppError extends Error {
   readonly upstreamStatus?: number;
   readonly operationId?: string;
   operationDurationMs?: number;
+  retryAfterSeconds?: number;
 
   constructor(options: AppErrorOptions) {
     super(options.publicMessage, { cause: options.cause });

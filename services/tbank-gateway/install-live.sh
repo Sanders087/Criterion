@@ -12,7 +12,7 @@ systemctl is-active --quiet criterion-tbank criterion-tbank-https
 install -d -m 755 "$target" "$target/certs"
 install -d -m 755 "$target/services/tbank-gateway" "$target/lib"
 install -m 644 "$stage/server.mjs" "$target/services/tbank-gateway/server.mjs"
-install -m 644 "$stage/lib/"{diagnostics,diagnostic-schema,request-context,payment-network}.mjs "$target/lib/"
+install -m 644 "$stage/lib/"{diagnostics,diagnostic-schema,diagnostic-ai,diagnostic-mail,diagnostic-payment,request-context,payment-network}.mjs "$target/lib/"
 ln -s ../../certs "$target/services/tbank-gateway/certs"
 install -m 644 /opt/criterion-tbank/certs/*.crt "$target/certs/"
 /opt/criterion-tbank/runtime/bin/node --input-type=module -e 'await import(process.argv[1])' "$target/services/tbank-gateway/server.mjs"

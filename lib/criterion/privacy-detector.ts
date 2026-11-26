@@ -13,15 +13,15 @@ export function trustedDetector(runtime: PrivacyEnv): PiiDetector {
   return async (texts) => {
     const token = runtime.PII_ANALYZER_TOKEN;
     if (!runtime.PII_ANALYZER_URL || !token || token.length < 32 || /[\r\n]/.test(token)) {
-      throw new PrivacyError();
+      throw new PrivacyError('PII_CONFIG_INVALID','detector_request');
     }
     let url: URL;
-    try { url = new URL(runtime.PII_ANALYZER_URL); } catch (cause) { throw new PrivacyError(cause); }
+    try { url = new URL(runtime.PII_ANALYZER_URL); } catch (cause) { throw new PrivacyError('PII_CONFIG_INVALID','detector_request',cause); }
     const loopback = ['127.0.0.1', '[::1]', 'localhost'].includes(url.hostname);
     if (url.username || url.password || url.search || url.hash ||
         url.pathname !== '/analyze' ||
         !(url.protocol === 'https:' || (loopback && url.protocol === 'http:'))) {
-      throw new PrivacyError();
+      throw new PrivacyError('PII_CONFIG_INVALID','detector_request');
     }
     try {
       const response = await fetch(url, {
@@ -32,10 +32,13 @@ export function trustedDetector(runtime: PrivacyEnv): PiiDetector {
         redirect: 'manual',
         signal: AbortSignal.timeout(8000),
       });
-      if (!response.ok) throw new PrivacyError();
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => {});
+        throw new PrivacyError('PII_HTTP_ERROR','detector_request',undefined,response.status);
+      }
       // Do not trust Content-Length alone or log an error body containing input.
       const reader = response.body?.getReader();
-      if (!reader) throw new PrivacyError();
+      if (!reader) throw new PrivacyError('PII_RESPONSE_INVALID','detector_response_validation');
       const chunks: Uint8Array[] = [];
       let size = 0;
       try {
@@ -44,8 +47,8 @@ export function trustedDetector(runtime: PrivacyEnv): PiiDetector {
           if (done) break;
           size += value.byteLength;
           if (size > 2_000_000) {
-            await reader.cancel();
-            throw new PrivacyError();
+            await reader.cancel().catch(() => {});
+            throw new PrivacyError('PII_RESPONSE_TOO_LARGE','detector_response_validation');
           }
           chunks.push(value);
         }
@@ -53,10 +56,12 @@ export function trustedDetector(runtime: PrivacyEnv): PiiDetector {
       const bytes = new Uint8Array(size);
       let offset = 0;
       for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
-      return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as Detection;
+      try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as Detection; }
+      catch (cause) { throw new PrivacyError('PII_RESPONSE_INVALID','detector_response_validation',cause); }
     } catch (cause) {
       if (cause instanceof PrivacyError) throw cause;
-      throw new PrivacyError(cause);
+      const timeout = cause instanceof Error && ['TimeoutError','AbortError'].includes(cause.name);
+      throw new PrivacyError(timeout ? 'PII_TIMEOUT' : 'PII_HTTP_ERROR','detector_request',cause);
     }
   };
 }

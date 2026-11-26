@@ -53,6 +53,8 @@ export function openDatabase(path, { migrate = true, migrationsDir = process.env
   } catch (error) { native.close(); throw error; }
   return {
     prepare: sql => new Statement(sql),
+    // This connection and its transaction callback are synchronous.
+    writeTransaction: transaction,
     batch: statements => transaction(() => statements.map(statement => statement.run())),
     query,
     queryBatch: queries => transaction(() => queries.map(item => query(item.sql, item.params, item.method))),

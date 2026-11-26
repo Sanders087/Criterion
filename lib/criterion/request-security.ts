@@ -1,3 +1,4 @@
+import { diagnostic } from '../diagnostics.mjs';
 import { isIP } from 'node:net';
 
 export function sameOrigin(request: Request) {
@@ -10,6 +11,10 @@ export function clientAddress(request: Request) {
   // Opt in only after the ingress is verified to overwrite this header.
   const header = process.env.TRUSTED_CLIENT_IP_HEADER;
   if (!header) return 'unknown';
+  if (!['cf-connecting-ip', 'x-real-ip'].includes(header.toLowerCase())) {
+    diagnostic('rate_limit.configuration_invalid', {addressKnown:false}, 'warn');
+    return 'unknown';
+  }
   const value = request.headers.get(header)?.trim() || '';
   return isIP(value) ? value : 'unknown';
 }

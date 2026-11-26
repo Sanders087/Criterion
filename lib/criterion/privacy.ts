@@ -1,4 +1,5 @@
-import { AppError } from './app-error.ts';
+import { diagnostic } from '../diagnostics.mjs';
+import { technicalCause, AppError } from './app-error.ts';
 /**
  * Request-scoped, reversible pseudonymization. Only the trusted detector sees
  * source text. The vault is kept in this closure, never sent to the LLM.
@@ -47,9 +48,9 @@ const hasReservedMarker = (text: string) =>
 const own = (obj: object, key: string) => Object.prototype.hasOwnProperty.call(obj, key);
 
 export class PrivacyError extends AppError {
-  constructor(cause?: unknown) {
-    super({ code: 'PRIVACY_ERROR', status: 500, publicMessage: 'Обработка ПДн не завершена. Операция остановлена; результат не сохранён.',
-      service: 'privacy', stage: 'privacy', retryable: false, cause });
+  constructor(code = 'PII_ANONYMIZATION_FAILED', stage = 'anonymization', cause?: unknown, upstreamStatus?: number) {
+    super({ code, status: 500, publicMessage: 'Обработка ПДн не завершена. Операция остановлена; результат не сохранён.',
+      service: 'privacy', stage, retryable: false, cause, upstreamStatus });
     this.name = 'PrivacyError';
   }
 }
@@ -75,7 +76,7 @@ function mapStrings(
   ancestors = new Set<object>(),
   depth = 0,
 ): unknown {
-  if (depth > LIMITS.depth) throw new PrivacyError();
+  if (depth > LIMITS.depth) throw new PrivacyError('PII_INPUT_LIMIT', 'input_validation');
   if (typeof value === 'string') return visit(value, path, false);
   if (value === null || typeof value === 'boolean') return value;
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -117,113 +118,154 @@ export async function protectRequest(
   const protocolStrings = new Set<number>();
   const knownValues = new Set<string>();
   let chars = 0;
-  mapStrings(input, (text, path, isKey) => {
-    validText(text);
-    if (hasReservedMarker(text)) throw new PrivacyError();
-    chars += text.length;
-    if (chars > LIMITS.chars || texts.length >= LIMITS.strings) throw new PrivacyError();
-    if ((isKey && SCHEMA_KEYS.has(text)) || (!isKey && isProtocolValue(text, path))) {
-      protocolStrings.add(texts.length);
+  let profile: string | undefined;
+  let entities: number | undefined;
+  function measure(stage: string) {
+    const start = performance.now();
+    function fields() {
+      return { stage, durationMs: Math.round(performance.now() - start), detectorProfile: profile,
+        entityCount: entities, sizeBucket: chars <= 1024 ? '0-1Ki' : chars <= 16384 ? '1-16Ki' : chars <= 131072 ? '16-128Ki' : '128Ki+' };
     }
-    texts.push(text);
-    if (!isKey && path.at(-2) === 'facts' && WHOLE_FIELDS.has(path.at(-1)!) && text.trim()) {
-      knownValues.add(text);
-    }
-    return text;
-  });
+    return {
+      done: () => diagnostic('pii.stage_completed', fields()),
+      fail(cause: unknown, fallback: string, keepDetectorStage = false): never {
+        const error = cause instanceof PrivacyError && (cause.stage === stage || keepDetectorStage)
+          ? cause : new PrivacyError(fallback, stage, cause);
+        diagnostic('pii.stage_failed', { ...fields(), stage: error.stage, errorCode: error.code,
+          causeCode: technicalCause(error), upstreamStatus: error.upstreamStatus }, 'error');
+        throw error;
+      },
+    };
+  }
+  const validation = measure('input_validation');
+  try {
+    mapStrings(input, (text, path, isKey) => {
+      validText(text);
+      if (hasReservedMarker(text)) throw new PrivacyError('PII_RESERVED_MARKER', 'input_validation');
+      chars += text.length;
+      if (chars > LIMITS.chars || texts.length >= LIMITS.strings) throw new PrivacyError('PII_INPUT_LIMIT', 'input_validation');
+      if ((isKey && SCHEMA_KEYS.has(text)) || (!isKey && isProtocolValue(text, path))) {
+        protocolStrings.add(texts.length);
+      }
+      texts.push(text);
+      if (!isKey && path.at(-2) === 'facts' && WHOLE_FIELDS.has(path.at(-1)!) && text.trim()) {
+        knownValues.add(text);
+      }
+      return text;
+    });
+    validation.done();
+  } catch (cause) { validation.fail(cause, 'PII_ANONYMIZATION_FAILED'); }
 
-  let detection: Detection;
+  let detection!: Detection;
+  const request = measure('detector_request');
   try {
     // A detector cannot change the texts which we later redact.
     detection = await detect(Object.freeze([...texts]));
+    request.done();
   } catch (cause) {
-    if (cause instanceof PrivacyError) throw cause;
-    throw new PrivacyError(cause);
+    request.fail(cause, 'PII_HTTP_ERROR', true);
   }
-  if (!detection || detection.profile !== 'ru-contract-v1' ||
-      detection.offsetUnit !== 'utf16' || !Array.isArray(detection.spans) ||
-      detection.spans.length > LIMITS.spans) throw new PrivacyError();
-
   const perText: PiiSpan[][] = texts.map(() => []);
-  for (const span of detection.spans) {
-    if (!span || !Number.isInteger(span.textIndex) || span.textIndex < 0 ||
-        span.textIndex >= texts.length || !Number.isInteger(span.start) ||
-        !Number.isInteger(span.end) || span.start < 0 || span.end <= span.start ||
-        span.end > texts[span.textIndex].length || typeof span.entityType !== 'string' ||
-        !/^[A-Z][A-Z0-9_]{0,31}$/.test(span.entityType) ||
-        !isBoundary(texts[span.textIndex], span.start) ||
-        !isBoundary(texts[span.textIndex], span.end)) throw new PrivacyError();
-    perText[span.textIndex].push({ ...span });
-  }
+  const response = measure('detector_response_validation');
+  try {
+    if (!detection || detection.profile !== 'ru-contract-v1' ||
+        detection.offsetUnit !== 'utf16' || !Array.isArray(detection.spans) ||
+        detection.spans.length > LIMITS.spans) throw new PrivacyError('PII_RESPONSE_INVALID', 'detector_response_validation');
 
-  // Known party/requisite fields are protected regardless of NER confidence,
-  // including their exact repetitions in messages, sources and templates.
-  texts.forEach((text, textIndex) => {
-    for (const value of knownValues) {
-      let start = text.indexOf(value);
-      while (start !== -1) {
-        perText[textIndex].push({ textIndex, start, end: start + value.length, entityType: 'KNOWN' });
-        if (perText[textIndex].length > LIMITS.spans) throw new PrivacyError();
-        start = text.indexOf(value, start + value.length);
-      }
+    for (const span of detection.spans) {
+      if (!span || !Number.isInteger(span.textIndex) || span.textIndex < 0 ||
+          span.textIndex >= texts.length || !Number.isInteger(span.start) ||
+          !Number.isInteger(span.end) || span.start < 0 || span.end <= span.start ||
+          span.end > texts[span.textIndex].length || typeof span.entityType !== 'string' ||
+          !/^[A-Z][A-Z0-9_]{0,31}$/.test(span.entityType) ||
+          !isBoundary(texts[span.textIndex], span.start) ||
+          !isBoundary(texts[span.textIndex], span.end)) throw new PrivacyError('PII_SPAN_INVALID', 'detector_response_validation');
+      perText[span.textIndex].push({ ...span });
     }
-  });
+    profile = detection.profile;
+    entities = detection.spans.length;
+    response.done();
+  } catch (cause) { response.fail(cause, 'PII_RESPONSE_INVALID'); }
 
-  const scope = crypto.randomUUID().replaceAll('-', '');
+  const mask = measure('anonymization');
   const originals = new Map<string, string>();
-  const tokensByValue = new Map<string, string>();
-  const sanitized = texts.map((text, textIndex) => {
-    if (protocolStrings.has(textIndex)) return text;
-    // Union overlapping spans; selecting one would leave part of a detected PII.
-    const sorted = perText[textIndex].sort((a, b) => a.start - b.start || b.end - a.end);
-    const merged: PiiSpan[] = [];
-    for (const span of sorted) {
-      const last = merged.at(-1);
-      if (last && span.start < last.end) {
-        last.end = Math.max(last.end, span.end);
-        if (last.entityType !== span.entityType) last.entityType = 'VALUE';
-      } else {
-        merged.push({ ...span });
+  let payload!: { instruction: string; data: unknown };
+  try {
+    // Known party/requisite fields are protected regardless of NER confidence,
+    // including their exact repetitions in messages, sources and templates.
+    texts.forEach((text, textIndex) => {
+      for (const value of knownValues) {
+        let start = text.indexOf(value);
+        while (start !== -1) {
+          perText[textIndex].push({ textIndex, start, end: start + value.length, entityType: 'KNOWN' });
+          if (perText[textIndex].length > LIMITS.spans) throw new PrivacyError();
+          start = text.indexOf(value, start + value.length);
+        }
       }
-    }
-    let result = '', from = 0;
-    for (const span of merged) {
-      const original = text.slice(span.start, span.end);
-      let token = tokensByValue.get(original);
-      if (!token) {
-        token = PII_PREFIX + scope + '_' + span.entityType + '_' + (originals.size + 1) + ']]';
-        originals.set(token, original);
-        tokensByValue.set(original, token);
-      }
-      result += text.slice(from, span.start) + token;
-      from = span.end;
-    }
-    return result + text.slice(from);
-  });
+    });
 
-  let index = 0;
-  const payload = mapStrings(input, () => sanitized[index++]) as { instruction: string; data: unknown };
+    const scope = crypto.randomUUID().replaceAll('-', '');
+    const tokensByValue = new Map<string, string>();
+    const sanitized = texts.map((text, textIndex) => {
+      if (protocolStrings.has(textIndex)) return text;
+      // Union overlapping spans; selecting one would leave part of a detected PII.
+      const sorted = perText[textIndex].sort((a, b) => a.start - b.start || b.end - a.end);
+      const merged: PiiSpan[] = [];
+      for (const span of sorted) {
+        const last = merged.at(-1);
+        if (last && span.start < last.end) {
+          last.end = Math.max(last.end, span.end);
+          if (last.entityType !== span.entityType) last.entityType = 'VALUE';
+        } else {
+          merged.push({ ...span });
+        }
+      }
+      let result = '', from = 0;
+      for (const span of merged) {
+        const original = text.slice(span.start, span.end);
+        let token = tokensByValue.get(original);
+        if (!token) {
+          token = PII_PREFIX + scope + '_' + span.entityType + '_' + (originals.size + 1) + ']]';
+          originals.set(token, original);
+          tokensByValue.set(original, token);
+        }
+        result += text.slice(from, span.start) + token;
+        from = span.end;
+      }
+      return result + text.slice(from);
+    });
+
+    let index = 0;
+    payload = mapStrings(input, () => sanitized[index++]) as { instruction: string; data: unknown };
+    mask.done();
+  } catch (cause) { mask.fail(cause, 'PII_ANONYMIZATION_FAILED'); }
+
   // Do not expose the map or make a global cross-user registry.
   const restore = (value: unknown) => {
-    let restoredChars = 0;
-    return mapStrings(value, (text) => {
-      validText(text);
-      const pattern = /\[\[CRITERION_PII_[A-Za-z0-9_]+\]\]/g;
-      const withoutTokens = text.replace(pattern, (token) => {
-        if (!originals.has(token)) throw new PrivacyError();
-        return '';
-      });
-      if (hasReservedMarker(withoutTokens)) throw new PrivacyError();
-      // One pass only: restored source text is never interpreted as a new token.
-      restoredChars += withoutTokens.length;
-      if (restoredChars > LIMITS.chars * 4) throw new PrivacyError();
-      return text.replace(pattern, (token) => {
-        const original = originals.get(token)!;
-        restoredChars += original.length;
+    const restoration = measure('pii_restoration');
+    try {
+      let restoredChars = 0;
+      const restored = mapStrings(value, (text) => {
+        validText(text);
+        const pattern = /\[\[CRITERION_PII_[A-Za-z0-9_]+\]\]/g;
+        const withoutTokens = text.replace(pattern, (token) => {
+          if (!originals.has(token)) throw new PrivacyError();
+          return '';
+        });
+        if (hasReservedMarker(withoutTokens)) throw new PrivacyError();
+        // One pass only: restored source text is never interpreted as a new token.
+        restoredChars += withoutTokens.length;
         if (restoredChars > LIMITS.chars * 4) throw new PrivacyError();
-        return original;
+        return text.replace(pattern, (token) => {
+          const original = originals.get(token)!;
+          restoredChars += original.length;
+          if (restoredChars > LIMITS.chars * 4) throw new PrivacyError();
+          return original;
+        });
       });
-    });
+      restoration.done();
+      return restored;
+    } catch (cause) { return restoration.fail(cause, 'PII_RESTORE_FAILED'); }
   };
   return { payload, restore };
 }

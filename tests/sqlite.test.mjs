@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, copyFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { openDatabase } from '../db/sqlite.mjs';
@@ -53,4 +53,26 @@ test('An untracked pre-existing application database is never silently reinitial
   const path = join(fixture(t), 'old.sqlite'), db = openDatabase(path, { migrate: false });
   db.prepare('CREATE TABLE documents(id TEXT)').run(); db.close();
   assert.throws(() => openDatabase(path), /Existing untracked database/);
+});
+
+test('P1 migration preserves legacy account, outstanding token and pending payment on reopen', t => {
+  const directory = fixture(t), migrationsDir = join(directory, 'before'), path = join(directory, 'legacy.sqlite');
+  mkdirSync(migrationsDir);
+  for (const name of readdirSync('drizzle').filter(name => /^000[0-3]_/.test(name) && name.endsWith('.sql'))) {
+    copyFileSync(join('drizzle',name),join(migrationsDir,name));
+  }
+  const legacy = openDatabase(path,{migrationsDir});
+  legacy.prepare('INSERT INTO accounts(id,email,password_hash,salt,recovery_hash,created_at) VALUES (?,?,?,?,?,?)').bind('account','legacy@example.test','hash','salt','recovery',1).run();
+  legacy.prepare('INSERT INTO email_tokens(token_hash,account_id,email,purpose,credential_hash,expires_at) VALUES (?,?,?,?,?,?)').bind('token-hash','account','legacy@example.test','verify','hash',1000).run();
+  legacy.prepare("INSERT INTO payment_orders(id,document_id,owner,amount,terminal_key,status,created_at,updated_at) VALUES ('order','doc','account',19900,'fixture','INITIALIZING',1,1)").run();
+  legacy.close();
+  const migrated = openDatabase(path);
+  try {
+    assert.equal(migrated.prepare('SELECT email FROM accounts').first().email,'legacy@example.test');
+    assert.equal(migrated.prepare('SELECT token_hash FROM email_tokens').first().token_hash,'token-hash');
+    const order = migrated.prepare('SELECT status,first_missing_at,cancel_requested_at FROM payment_orders').first();
+    assert.deepEqual({...order},{status:'INITIALIZING',first_missing_at:0,cancel_requested_at:0});
+    assert.equal(migrated.prepare('SELECT count(*) n FROM mail_attempts').first().n,0);
+  } finally { migrated.close(); }
+  openDatabase(path).close();
 });

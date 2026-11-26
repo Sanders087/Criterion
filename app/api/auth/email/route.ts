@@ -1,10 +1,11 @@
+import {checkLimit} from '../../../../lib/criterion/rate-limit';
 import {sameOrigin,clientAddress} from '../../../../lib/criterion/request-security';
 import {reportSuppressed} from '../../../../lib/criterion/api-observability';
 import {env} from '../../../../lib/runtime';
 import {z} from 'zod';
 import {digest,getAccount,passwordHash,randomToken,sessionCookie} from '../../../../lib/criterion/auth';
 import {mailReady} from '../../../../lib/criterion/mail';
-import {issueEmail,mailConfig} from '../../../../lib/criterion/email-tokens';
+import {issueEmail,mailConfig,mailConfigurationError,mailRequest,skipMail} from '../../../../lib/criterion/email-tokens';
 import {apiDefaults, apiRoute,HttpError,json,parseBodyJson} from '../../../../lib/criterion/server';
 const generic='Если адрес подтверждён и связан с аккаунтом, мы отправим ссылку для сброса пароля. Проверьте входящие и спам.';
 export const POST = apiRoute('/api/auth/email', async (request:Request) => {
@@ -12,23 +13,39 @@ export const POST = apiRoute('/api/auth/email', async (request:Request) => {
  if(!request.headers.get('content-type')?.includes('application/json'))throw new HttpError(415,'Ожидается JSON.');
  const raw=await request.text();if(raw.length>4096)throw new HttpError(413,'Слишком большой запрос.');
  const parsed=parseBodyJson(raw);
- const data=z.object({action:z.enum(['request-reset','send-verification','verify','reset']),email:z.string().trim().email().max(254).optional(),token:z.string().regex(/^[a-f0-9]{64}$/).optional(),password:z.string().min(12).max(256).optional()}).parse(parsed);
+ const data=inputSchema.parse(parsed);
+ if(data.action==='request-reset'||data.action==='send-verification'){
+  return mailRequest(data.action==='request-reset'?'reset':'verify',()=>handle(request,data));
+ }
+ return handle(request,data);
+});
+
+const inputSchema=z.object({action:z.enum(['request-reset','send-verification','verify','reset']),email:z.string().trim().email().max(254).optional(),token:z.string().regex(/^[a-f0-9]{64}$/).optional(),password:z.string().min(12).max(256).optional()});
+
+async function handle(request:Request,data:z.infer<typeof inputSchema>){
  const now=Date.now(),db=env.DB!,email=data.email?.toLowerCase();
  const sending=data.action==='request-reset'||data.action==='send-verification';
- if(sending&&!mailReady(mailConfig()))throw new HttpError(503,'Отправка писем пока недоступна. Используйте сохранённый код восстановления.');
+ const mailType = data.action==='request-reset'?'reset':'verify';
+ if(sending&&!mailReady(mailConfig())){
+  skipMail(mailType,true);
+  throw mailConfigurationError();
+ }
  const user=data.action==='send-verification'||data.action==='verify'?await getAccount():null;
  if((data.action==='send-verification'||data.action==='verify')&&!user)throw new HttpError(401,'Войдите в аккаунт в этом браузере и снова откройте ссылку подтверждения.');
- const target=sending?(email||user?.email||'email'):(user?.email||await digest(data.token||''));const window=sending?3600000:900000;
- for(const [scope,limit] of [[`mail-ip:${clientAddress(request)}`,sending?20:40],[`mail-target:${sending?'send':'consume'}:${target}`,sending?3:20]] as const){const row=await db.prepare('INSERT INTO auth_limits (key,count,expires_at) VALUES (?,1,?) ON CONFLICT(key) DO UPDATE SET count=CASE WHEN expires_at<=? THEN 1 ELSE count+1 END, expires_at=CASE WHEN expires_at<=? THEN excluded.expires_at ELSE expires_at END RETURNING count').bind(await digest(scope),now+window,now,now).first<{count:number}>();if((row?.count||0)>limit)throw new HttpError(429,'Слишком много запросов. Попробуйте позже.');}
+ const target=sending?(data.action==='send-verification'?user!.email:email||'email'):(user?.email||await digest(data.token||''));
+ const window=sending?3600000:900000;
+ const address=clientAddress(request), known=address!=='unknown';
+ await checkLimit('mail-ip:'+address,'mail_address',sending?20:40,window,now,known,sending?mailType:undefined);
+ await checkLimit('mail-target:'+(sending?'send':'consume')+':'+target,sending?'mail_recipient':'mail_token',sending?3:20,window,now,known,sending?mailType:undefined);
  if(data.action==='send-verification'){
-  if(user!.emailVerified)return json({ok:true,message:'Email уже подтверждён.'});
+  if(user!.emailVerified){skipMail('verify');return json({ok:true,message:'Email уже подтверждён.'});}
   await issueEmail(user!.userId,'verify');
   return json({ok:true,message:'Письмо подтверждения передано почтовому сервису. Проверьте входящие и спам.'});
  }
  if(data.action==='request-reset'){
   if(!email)throw new HttpError(400,'Введите email.');
   const account=await db.prepare('SELECT id,email_verified_at FROM accounts WHERE email=?').bind(email).first<{id:string,email_verified_at:number|null}>();
-  if(account?.email_verified_at){try{await issueEmail(account.id,'reset')}catch(cause){reportSuppressed(cause);}}
+  if(account?.email_verified_at){try{await issueEmail(account.id,'reset')}catch(cause){reportSuppressed(cause);}}else{skipMail('reset')}
   return json({ok:true,message:generic});
  }
  if(!data.token)throw new HttpError(400,'Ссылка недействительна.');
@@ -49,6 +66,6 @@ export const POST = apiRoute('/api/auth/email', async (request:Request) => {
  ]);
  if(results[0].meta.changes!==1)throw new HttpError(400,'Ссылка истекла или уже использована. Запросите новую.');
  return Response.json({ok:true,recoveryCode,message:'Пароль изменён. Войдите с новым паролем.'},{headers:{'Cache-Control':'no-store','Set-Cookie':sessionCookie('',0)}});
-});
+}
 
 export const { GET, HEAD, PUT, PATCH, DELETE, OPTIONS } = apiDefaults('/api/auth/email', ['POST']);

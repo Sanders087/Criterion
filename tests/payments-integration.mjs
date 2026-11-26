@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 const fetchMock=createFetchMock();fetchMock.disableNetConnect();
 const terminal='fixtureDEMO',password='!fixture-not-real-Ж$"',cookie='__Host-criterion_session='+'a'.repeat(64),owner='payment-user';
 const receiptEmails=[];const bankPayments=new Map();let initCount=0,checks=0,failAI=false,failInit=false,lostInit=false,unreceivedInit=false,failCheckOrder=false;
-let failDetector=false,modelCalls=0,malformedDenial=false;
+let failDetector=false,modelCalls=0,malformedDenial=false,lostCancel=false,cancelCount=0;
 const piiToken='fixture-pii-token-with-at-least-32-characters';
 fetchMock.get('https://pii.test').intercept({path:'/analyze',method:'POST',headers:{authorization:'Bearer '+piiToken}}).reply(200,()=>{
   return JSON.stringify(failDetector?{error:'fixture failure'}:{profile:'ru-contract-v1',offsetUnit:'utf16',spans:[]});
@@ -14,14 +14,17 @@ for(const method of ['Init','GetState','CheckOrder','Cancel'])fetchMock.get('htt
   const data=await new Response(options.body).json();try{assert.equal(data.Token,token(data));assert.equal(data.TerminalKey,terminal)}catch(e){console.error('Mock bank request validation failed:',e);throw e}
   if(method==='Init'){
     receiptEmails.push(data.Receipt.Email);initCount++;assert.equal(data.Amount,19900);assert.equal(data.PayType,'O');assert.equal(data.Receipt.Items[0].Amount,19900);assert.equal(data.DATA.OperationInitiatorType,'0');assert.equal(data.NotificationURL,'https://criterion.test/api/payments/tbank/notification');
-    if(failInit)return JSON.stringify({Success:false,ErrorCode:'999'});
+    if(failInit)return JSON.stringify({Success:false,ErrorCode:failInit});
     if(unreceivedInit)return 'invalid-json';
     const payment={TerminalKey:terminal,Success:true,ErrorCode:'0',Amount:19900,OrderId:data.OrderId,PaymentId:String(1000+initCount),Status:'NEW',PaymentURL:'https://securepay.tinkoff.ru/new/'+data.OrderId};bankPayments.set(payment.PaymentId,payment);
     if(malformedDenial)return JSON.stringify({Success:false,ErrorCode:''});
+    if (lostInit==='timeout') throw new DOMException('Fixture bank accepted the order before timeout','TimeoutError');
     return lostInit?'invalid-json':JSON.stringify(payment);
   }
-  if(method==='CheckOrder'){if(failCheckOrder)return JSON.stringify({Success:false,ErrorCode:'999'});const payments=[...bankPayments.values()].filter(p=>p.OrderId===data.OrderId);return JSON.stringify(payments.length?{TerminalKey:terminal,Success:true,ErrorCode:'0',OrderId:data.OrderId,Payments:payments}:{Success:false,ErrorCode:'335'})}
-  if(method==='Cancel'){const payment=bankPayments.get(data.PaymentId);assert.equal(payment.Status,'NEW');payment.Status='CANCELED';return JSON.stringify(payment)}
+  if(method==='CheckOrder'){
+    if(failCheckOrder==='contradictory')return JSON.stringify({Success:false,ErrorCode:'335',OrderId:'different-order',Payments:[{PaymentId:'123'}]});
+    if(failCheckOrder)return JSON.stringify({Success:false,ErrorCode:'999'});const payments=[...bankPayments.values()].filter(p=>p.OrderId===data.OrderId);return JSON.stringify(payments.length?{TerminalKey:terminal,Success:true,ErrorCode:'0',OrderId:data.OrderId,Payments:payments}:{Success:false,ErrorCode:'335'})}
+  if(method==='Cancel'){cancelCount++;const payment=bankPayments.get(data.PaymentId);assert.equal(payment.Status,'NEW');payment.Status='CANCELED';return lostCancel?'invalid-json':JSON.stringify(payment)}
   return JSON.stringify(bankPayments.get(data.PaymentId)||{Success:false,ErrorCode:'7'});
 }).persist();
 fetchMock.get('https://api.openai.com').intercept({path:'/v1/chat/completions',method:'POST'}).reply(200,async options=>{
@@ -65,11 +68,24 @@ try{
   const bad={...payment,Status:'CONFIRMED',Token:'0'.repeat(64)};assert.equal((await mf.dispatchFetch('https://criterion.test/api/payments/tbank/notification',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(bad)})).status,403);checks++;
   await notification(payment,{Status:'CONFIRMED',Amount:1},400);await notification(payment,{Status:'CONFIRMED',PaymentId:'999999'},400);
   const notificationRequestId=await notification(payment,{Status:'AUTHORIZED'});
-  const webhook=readEvents().find(e=>e.event==='operation.completed'&&e.requestId===notificationRequestId);
+  const webhook=readEvents().find(e=>e.event==='payment.notification_received'&&e.requestId===notificationRequestId);
   assert.equal(webhook?.operationId,initEvent.operationId);
   assert.notEqual(notificationRequestId,initEvent.requestId);checks++;
   assert.equal((await request(path)).billing.locked,true);
-  payment.Status='CONFIRMED';await notification(payment,{Amount:'19900'});await notification(payment);await notification(payment,{Status:'AUTHORIZED'});
+  payment.Status='CONFIRMED';
+  await db.prepare("CREATE TRIGGER simulate_grant_failure BEFORE UPDATE OF billing_state ON documents WHEN NEW.billing_state='paid' BEGIN SELECT RAISE(ABORT,'fixture'); END").run();
+  const failedGrant=await notification(payment,{},500);
+  assert.ok(readEvents().some(e=>e.event==='payment.access_grant_failed'&&e.requestId===failedGrant));
+  assert.equal((await db.prepare('SELECT status FROM payment_orders WHERE id=?').bind(payment.OrderId).first()).status,'AUTHORIZED');
+  assert.equal((await db.prepare('SELECT billing_state FROM documents WHERE id=?').bind(doc.id).first()).billing_state,'unpaid');
+  await db.prepare('DROP TRIGGER simulate_grant_failure').run();
+  const grantedId=await notification(payment,{Amount:'19900'});
+  assert.ok(readEvents().some(e=>e.event==='payment.access_granted'&&e.requestId===grantedId));
+  const duplicateId=await notification(payment);
+  assert.ok(readEvents().some(e=>e.event==='payment.notification_duplicate'&&e.requestId===duplicateId));
+  await notification(payment,{Status:'AUTHORIZED'});
+  await notification(payment,{Status:'REJECTED',Success:false,ErrorCode:'5'});
+  assert.equal((await db.prepare('SELECT status FROM payment_orders WHERE id=?').bind(payment.OrderId).first()).status,'CONFIRMED');checks++;
   doc=await request(path);assert.equal(doc.billing.locked,false);assert.equal(doc.billing.aiRemaining,2);assert.match(JSON.stringify(doc),/PRIVATE-GENERATED/);
   assert.equal((await db.prepare("SELECT COUNT(*) count FROM payment_events WHERE order_id=? AND status='CONFIRMED'").bind(payment.OrderId).first()).count,1);
   // A detector failure must not spend a paid operation or save a partial document.
@@ -97,23 +113,30 @@ try{
   malformedDenial = true;
   const ambiguousResult = await request('/api/payments/checkout','POST',{documentId:ambiguous.id},502);
   malformedDenial = false;
-  assert.equal(ambiguousResult.code,'BANK_RESPONSE_INVALID');
+  assert.equal(ambiguousResult.code,'PAYMENT_CHECK_REQUIRED');
+  assert.equal((await request('/api/documents/'+ambiguous.id)).billing.checkRequired,true);
   await request('/api/payments/checkout','POST',{documentId:ambiguous.id},409);
   const reservations = await db.prepare('SELECT id,status,active_document FROM payment_orders WHERE document_id=?').bind(ambiguous.id).all();
   assert.equal(reservations.results.length,1);
   assert.equal(reservations.results[0].active_document,ambiguous.id);
-  assert.equal(reservations.results[0].status,'INITIALIZING');
+  assert.equal(reservations.results[0].status,'INIT_OUTCOME_UNKNOWN');
   assert.equal(initCount,beforeAmbiguous+1);checks++;
   // A lost Init response is reconciled by its immutable OrderId, without another Init.
-  let second=await request('/api/documents','POST',{kind:'services',mode:'ai'},201);second=await request('/api/documents/'+second.id,'PATCH',{action:'generate',revision:0});lostInit=true;const beforeLost=initCount;
-  await request('/api/payments/checkout','POST',{documentId:second.id},502);lostInit=false;
+  let second=await request('/api/documents','POST',{kind:'services',mode:'ai'},201);second=await request('/api/documents/'+second.id,'PATCH',{action:'generate',revision:0});lostInit='timeout';const beforeLost=initCount;
+  const timeoutResult=await request('/api/payments/checkout','POST',{documentId:second.id},502);lostInit=false;
+  assert.equal(timeoutResult.code,'PAYMENT_CHECK_REQUIRED');
+  assert.ok(readEvents().some(e=>e.event==='payment.init_outcome_unknown' && e.errorCode==='BANK_TIMEOUT' && e.requestId===timeoutResult.requestId));
   const lost=[...bankPayments.values()].at(-1);lost.Status='CONFIRMED';await db.prepare('UPDATE payment_orders SET created_at=?,checked_at=0 WHERE id=?').bind(Date.now()-60000,lost.OrderId).run();
   const recovered=await request('/api/payments/status','POST',{documentId:second.id});assert.equal(recovered.document.billing.state,'paid');assert.equal(initCount,beforeLost+1);checks++;
   // An unshown NEW link is safely cancelled before retry; charged payments are never auto-refunded.
   let third=await request('/api/documents','POST',{kind:'services',mode:'ai'},201);third=await request('/api/documents/'+third.id,'PATCH',{action:'generate',revision:0});lostInit=true;
   await request('/api/payments/checkout','POST',{documentId:third.id},502);lostInit=false;
   const orphan=[...bankPayments.values()].at(-1);await db.prepare('UPDATE payment_orders SET created_at=?,checked_at=0 WHERE id=?').bind(Date.now()-60000,orphan.OrderId).run();
-  const canceled=await request('/api/payments/status','POST',{documentId:third.id});assert.equal(canceled.status,'CANCELED');assert.equal(canceled.document.billing.state,'unpaid');
+  const cancelsBefore=cancelCount;lostCancel=true;
+  await request('/api/payments/status','POST',{documentId:third.id},502);lostCancel=false;
+  assert.equal(cancelCount,cancelsBefore+1);
+  await db.prepare('UPDATE payment_orders SET checked_at=0 WHERE id=?').bind(orphan.OrderId).run();
+  const canceled=await request('/api/payments/status','POST',{documentId:third.id});assert.equal(cancelCount,cancelsBefore+1);assert.equal(canceled.status,'CANCELED');assert.equal(canceled.document.billing.state,'unpaid');
   const retry=await request('/api/payments/checkout','POST',{documentId:third.id});assert.ok(retry.paymentUrl);assert.notEqual(retry.paymentUrl,orphan.PaymentURL);
   // A request that never reached the bank may recover only after an explicit 335,
   // beyond the grace period. A generic failure must not create a second payment.
@@ -121,11 +144,35 @@ try{
   await request('/api/payments/checkout','POST',{documentId:fourth.id},502);unreceivedInit=false;
   const missing=await db.prepare('SELECT id FROM payment_orders WHERE document_id=?').bind(fourth.id).first();
   await db.prepare('UPDATE payment_orders SET created_at=?,checked_at=0 WHERE id=?').bind(Date.now()-60000,missing.id).run();
-  const recent=await request('/api/payments/status','POST',{documentId:fourth.id});assert.equal(recent.status,'INITIALIZING');
+  const recent=await request('/api/payments/status','POST',{documentId:fourth.id});assert.equal(recent.status,'INIT_OUTCOME_UNKNOWN');
   await db.prepare('UPDATE payment_orders SET created_at=?,checked_at=0 WHERE id=?').bind(Date.now()-180000,missing.id).run();failCheckOrder=true;
-  const beforeRetry=initCount;await request('/api/payments/checkout','POST',{documentId:fourth.id},409);assert.equal(initCount,beforeRetry);failCheckOrder=false;
+  const beforeRetry=initCount;await request('/api/payments/checkout','POST',{documentId:fourth.id},502);assert.equal(initCount,beforeRetry);failCheckOrder=false;
   await db.prepare('UPDATE payment_orders SET checked_at=0 WHERE id=?').bind(missing.id).run();
+  const firstMissing=await request('/api/payments/status','POST',{documentId:fourth.id});
+  assert.equal(firstMissing.status,'INIT_OUTCOME_UNKNOWN');
+  await db.prepare('UPDATE payment_orders SET checked_at=0,first_missing_at=? WHERE id=?').bind(Date.now()-31000,missing.id).run();
+  failCheckOrder='contradictory';
+  const contradiction=await request('/api/payments/status','POST',{documentId:fourth.id},502);failCheckOrder=false;
+  assert.equal(contradiction.code,'PAYMENT_CHECK_REQUIRED');
+  const retained=await db.prepare('SELECT active_document,first_missing_at FROM payment_orders WHERE id=?').bind(missing.id).first();
+  assert.equal(retained.active_document,fourth.id);assert.equal(retained.first_missing_at,0);
+  await db.prepare('UPDATE payment_orders SET checked_at=0 WHERE id=?').bind(missing.id).run();
+  await request('/api/payments/checkout','POST',{documentId:fourth.id},409);
+  assert.equal(initCount,beforeRetry);
+  await db.prepare('UPDATE payment_orders SET checked_at=0,first_missing_at=? WHERE id=?').bind(Date.now()-31000,missing.id).run();
+  const closed=await request('/api/payments/status','POST',{documentId:fourth.id});
+  assert.equal(closed.status,'INIT_FAILED');assert.ok(!closed.document.billing.checkRequired);
   const retried=await request('/api/payments/checkout','POST',{documentId:fourth.id});assert.ok(retried.paymentUrl);assert.equal(initCount,beforeRetry+1);assert.equal(retried.document.billing.state,'unpaid');
   assert.equal((await db.prepare('SELECT status FROM payment_orders WHERE id=?').bind(missing.id).first()).status,'INIT_FAILED');checks++;
+  // Documented request-validation refusals release the reservation; internal/duplicate replies keep it.
+  let rejected=await request('/api/documents','POST',{kind:'services',mode:'ai'},201);
+  rejected=await request('/api/documents/'+rejected.id,'PATCH',{action:'generate',revision:0});
+  failInit='64';const knownRejection=await request('/api/payments/checkout','POST',{documentId:rejected.id},502);
+  assert.equal(knownRejection.code,'BANK_REQUEST_REJECTED');
+  assert.equal((await db.prepare('SELECT active_document FROM payment_orders WHERE document_id=?').bind(rejected.id).first()).active_document,null);
+  failInit='20';const uncertain=await request('/api/payments/checkout','POST',{documentId:rejected.id},502);
+  assert.equal(uncertain.code,'PAYMENT_CHECK_REQUIRED');
+  assert.equal((await db.prepare('SELECT status FROM payment_orders WHERE active_document=?').bind(rejected.id).first()).status,'INIT_OUTCOME_UNKNOWN');
+  failInit=false;
   console.log(`Payment integration checks passed: ${checks}. No real bank or AI calls.`);
 }finally{await mf.dispose()}

@@ -28,7 +28,9 @@ export function apiRoute<Args extends unknown[]>(route: string,
       return Response.json({ error: error.publicMessage, code: error.code, requestId,
         ...(route === '/api/health' ? { status: 'unavailable' } : {}) }, {
         status: error.status, headers: { 'X-Request-ID': requestId,
-          'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }
+          'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
+          ...(error.status === 429 && Number.isInteger(error.retryAfterSeconds) && error.retryAfterSeconds! > 0 && error.retryAfterSeconds! <= 86400
+            ? { 'Retry-After': String(error.retryAfterSeconds) } : {}) }
       });
     }
   });
