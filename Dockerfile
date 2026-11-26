@@ -25,7 +25,7 @@ COPY --from=site-build --chown=criterion:criterion /app/.next/static/ ./.next/st
 COPY --from=site-build --chown=criterion:criterion /app/public/ ./public/
 COPY --chown=criterion:criterion drizzle/ ./drizzle/
 COPY --chown=criterion:criterion db/sqlite.mjs ./db/sqlite.mjs
-COPY --chown=criterion:criterion lib/diagnostics.mjs lib/diagnostic-schema.mjs lib/request-context.mjs ./lib/
+COPY --chown=criterion:criterion lib/diagnostics.mjs lib/diagnostic-*.mjs lib/request-context.mjs ./lib/
 COPY --chown=criterion:criterion scripts/start-site.mjs scripts/run-with-pii.mjs scripts/check-pii-endpoint.py scripts/backup-db.py scripts/storage-diagnostics.mjs ./scripts/
 COPY --chown=criterion:criterion services/pii/__init__.py services/pii/app.py services/pii/detector.py ./services/pii/
 COPY deploy/amvera/entrypoint.py /entrypoint.py

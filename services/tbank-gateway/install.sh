@@ -24,7 +24,7 @@ tar --no-same-owner -xzf "$stage/caddy.tar.gz" -C "$target" caddy
 chmod 755 "$target/caddy"
 install -d -m 755 "$target/services/tbank-gateway" "$target/lib"
 install -m 644 "$stage/server.mjs" "$target/services/tbank-gateway/server.mjs"
-install -m 644 "$stage/lib/"{diagnostics,diagnostic-schema,request-context,payment-network}.mjs "$target/lib/"
+install -m 644 "$stage/lib/"{diagnostics,diagnostic-schema,diagnostic-ai,diagnostic-mail,diagnostic-payment,request-context,payment-network}.mjs "$target/lib/"
 ln -s ../../certs "$target/services/tbank-gateway/certs"
 install -m 644 "$stage/Caddyfile" "$target/"
 install -m 644 "$stage/certs/"*.crt "$target/certs/"
