@@ -1,4 +1,4 @@
 .criterion-error{display:flex;align-items:flex-start;gap:10px;margin:16px 0;padding:14px;border:1px solid #e8c6bd;border-radius:8px;background:#fff3ee;color:#732b23;overflow-wrap:anywhere}
 .criterion-error-body{flex:1;min-width:0}.criterion-error .criterion-error-body p{margin:4px 0;color:inherit}
-.criterion-error .criterion-error-meta{font-size:.85rem}.criterion-error .text-button{margin:6px 8px 0 0}
+.criterion-error .text-button{margin:6px 8px 0 0}
 .criterion-error label,.criterion-error textarea{display:block;width:100%;margin-top:6px}.criterion-error textarea{font-family:monospace}

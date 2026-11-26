@@ -69,7 +69,6 @@ export function supportData(error: ApiError) {
     'Операция: ' + (Object.hasOwn(operations,error.operation) ? operations[error.operation] : operations.ui),
   ].join('\n');
 }
-export function operationLabel(operation: ClientOperation) { return operations[operation]; }
 export async function responseError(response: Response, operation: ClientOperation = 'ui') {
   let data: { error?: unknown; code?: unknown; requestId?: unknown } | null = null;
   try { data = await response.json(); } catch { /* HTTP failures may have a proxy HTML body. */ }
@@ -78,6 +77,8 @@ export async function responseError(response: Response, operation: ClientOperati
   let message = typeof data?.error === 'string' ? data.error : 'Сервер не смог выполнить запрос. Попробуйте позже.';
   if (response.status === 401 && !['login','recover','verify','reset'].includes(operation))
     message = 'Срок входа истёк. Войдите в аккаунт и повторите действие.';
+  if (operation === 'payment_status' && response.status >= 500 && /^(BANK|GATEWAY)_/.test(knownCode(data?.code)))
+    message = 'Не удалось проверить оплату. Попробуйте чуть позже.';
   if (data?.code === 'PAYMENT_CHECK_REQUIRED') message = 'Проверьте состояние платежа перед следующей попыткой.';
   return new ApiError(response.status,message,data?.code,operation,id);
 }
