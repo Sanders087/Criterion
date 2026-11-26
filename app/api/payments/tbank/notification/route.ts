@@ -10,7 +10,7 @@ export const POST = apiRoute('/api/payments/tbank/notification', async (request:
   if(!data||typeof data!=='object'||Array.isArray(data))throw new HttpError(400,'Неверное уведомление.');
   const config=bankConfig(runtime());
   if(data.TerminalKey!==config.terminalKey||!await verifyBankToken(data,config.password))throw new HttpError(403,'Неверная подпись.');
-  await applyBankState(data);
+  await applyBankState(data,'notification');
   return new Response('OK',{status:200,headers:{'Content-Type':'text/plain; charset=utf-8','Cache-Control':'no-store'}});
 });
 

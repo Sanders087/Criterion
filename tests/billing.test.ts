@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import {createHash,createHmac,randomUUID} from 'node:crypto';
 import {runTrustedContext} from '../lib/request-context.mjs';
 import {retryableRead,traceInput} from '../lib/payment-network.mjs';
-import {bankToken,verifyBankToken,initParameters,checkoutReady,paymentUrl,bankRequest,bankConfig} from '../lib/criterion/tbank.ts';
+import {DatabaseSync} from 'node:sqlite';
+import {PaymentError,withPaymentOrder,bankToken,verifyBankToken,initParameters,checkoutReady,paymentUrl,bankRequest,bankConfig} from '../lib/criterion/tbank.ts';
 import {presentContract} from '../lib/criterion/billing.ts';
 import {demoContract} from '../lib/criterion/domain.ts';
 const env={TBANK_ENABLED:'true',TBANK_TERMINAL_KEY:'fixtureDEMO',TBANK_PASSWORD:'fixture-password',TBANK_PUBLIC_URL:'https://criterion.test',TBANK_RECEIPT_MODE:'bank',TBANK_TAXATION:'usn_income',TBANK_TAX:'none',TBANK_PAYMENT_METHOD:'full_payment',TBANK_PAYMENT_OBJECT:'intellectual_activity'};
@@ -70,6 +71,28 @@ test('VPS transport signs the exact body without disclosing the bank password',a
   assert.deepEqual(await bankRequest(gateway,'CheckOrder',{OrderId:'fixture'}),{Success:true,ErrorCode:'0'});
   for(const changes of [{TBANK_GATEWAY_URL:'https://example.com/criterion-tbank/'},{TBANK_GATEWAY_SECRET:'short'},{TBANK_TERMINAL_KEY:'123456'},{TBANK_API_URL:'https://rest-api-test.tinkoff.ru/v2/'}])assert.throws(()=>bankConfig({...gateway,...changes}));
 });
+test('payment order error retains the original SQLite failure and order ID after its async scope ends',async()=>{
+  const orderId=randomUUID(),db=new DatabaseSync(':memory:');
+  let original:unknown;
+  try {
+    await assert.rejects(withPaymentOrder(orderId,async()=>{
+      try { db.prepare('SELECT * FROM missing_fixture_table').get(); }
+      catch(cause){ original=cause; throw cause; }
+    }),error=>{
+      assert.ok(error instanceof Error);
+      assert.equal((error as {code?:string}).code,'DATABASE_ERROR');
+      assert.equal((error as {operationId?:string}).operationId,'o_'+orderId);
+      assert.equal(error.cause,original);
+      return true;
+    });
+    let typed:PaymentError|undefined;
+    await assert.rejects(withPaymentOrder(orderId,async()=>{
+      typed=new PaymentError(409,'Уточняется статус оплаты.');
+      throw typed;
+    }),error=>error===typed);
+  } finally { db.close(); }
+});
+
 test('site forwards authenticated trace headers only to configured gateway',async t=>{
   const context={requestId:'r_'+randomUUID(),operationId:'o_'+randomUUID()};
   const gateway={...env,TBANK_GATEWAY_URL:'https://srv678677.hstgr.cloud/criterion-tbank/',TBANK_GATEWAY_SECRET:'c'.repeat(64)};

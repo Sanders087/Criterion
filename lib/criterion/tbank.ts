@@ -1,7 +1,7 @@
 import { Buffer } from 'node:buffer';
-import { AppError } from './app-error.ts';
+import { AppError, normalizeError } from './app-error.ts';
 import { diagnostic } from '../diagnostics.mjs';
-import { getRequestContext } from '../request-context.mjs';
+import { getRequestContext, runOperation } from '../request-context.mjs';
 import { SITE_MS, networkCode, retryableRead, traceInput, isBankCode, validBankEnvelope } from '../payment-network.mjs';
 import { CONTRACT_PRICE } from './billing.ts';
 
@@ -19,6 +19,13 @@ export class PaymentError extends AppError {
     super({ ...details, status, code, publicMessage:message, service:'payments', stage:details.stage ?? 'payment' });
   }
 }
+export function withPaymentOrder<T>(orderId:string, work:() => Promise<T>):Promise<T> {
+  return runOperation(async () => {
+    try { return await work(); }
+    catch (cause) { throw normalizeError(cause); }
+  }, 'o_' + orderId);
+}
+
 export type BankData = Record<string,unknown>;
 const API_URLS=['https://securepay.tinkoff.ru/v2/','https://rest-api-test.tinkoff.ru/v2/'];
 const PAYMENT_HOSTS=['securepay.tinkoff.ru','rest-api-test.tinkoff.ru','pay.tbank-online.com'];

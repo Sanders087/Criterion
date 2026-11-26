@@ -35,7 +35,7 @@ async function request(path,method='GET',body,status=200,headers={}){
   const response=await mf.dispatchFetch('https://criterion.test'+path,{method,headers:{cookie,Origin:'https://criterion.test',...(body?{'content-type':'application/json'}:{}),...headers},body:body?JSON.stringify(body):undefined});
   const data=await response.json();assert.equal(response.status,status,JSON.stringify(data));checks++;return data;
 }
-async function notification(payment,changes={},expected=200){const body={...payment,...changes};delete body.PaymentURL;body.Token=token(body);const response=await mf.dispatchFetch('https://criterion.test/api/payments/tbank/notification',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});assert.equal(response.status,expected,await response.clone().text());if(expected===200)assert.equal(await response.text(),'OK');checks++;}
+async function notification(payment,changes={},expected=200){const body={...payment,...changes};delete body.PaymentURL;body.Token=token(body);const response=await mf.dispatchFetch('https://criterion.test/api/payments/tbank/notification',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});assert.equal(response.status,expected,await response.clone().text());if(expected===200)assert.equal(await response.text(),'OK');checks++;return response.headers.get('X-Request-ID');}
 try{
  const db=mf.database();
   await db.prepare('INSERT INTO accounts(id,email,password_hash,salt,recovery_hash,created_at) VALUES(?,?,?,?,?,?)').bind(owner,'payments@example.test','test','test','test',Date.now()).run();
@@ -57,10 +57,17 @@ try{
   const attempts=await Promise.all([0,1].map(()=>mf.dispatchFetch('https://criterion.test/api/payments/checkout',{method:'POST',headers:{cookie,Origin:'https://criterion.test','content-type':'application/json'},body:JSON.stringify({documentId:doc.id,receiptEmail:"receipt@example.test"})})));
   assert.ok(attempts.every(r=>[200,409].includes(r.status)));assert.ok(attempts.some(r=>r.status===200));assert.equal(initCount,before+1);assert.equal(receiptEmails.at(-1),"receipt@example.test");const initialized=await attempts.find(r=>r.status===200).json();assert.match(initialized.paymentUrl,/securepay/);checks++;
   const payment=[...bankPayments.values()].find(p=>p.OrderId===initialized.paymentUrl.split('/').at(-1));assert.ok(payment);
+  const readEvents=()=>mf.logs().split('\n').filter(line=>line.startsWith('{')).map(line=>JSON.parse(line));
+  const initEvent=readEvents().find(e=>e.event==='payment.transport_completed'&&e.bankMethod==='Init'&&e.operationId==='o_'+payment.OrderId);
+  assert.ok(initEvent?.requestId);
   await request(path,'PATCH',{action:'delete',revision:doc.revision},409);
   const bad={...payment,Status:'CONFIRMED',Token:'0'.repeat(64)};assert.equal((await mf.dispatchFetch('https://criterion.test/api/payments/tbank/notification',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(bad)})).status,403);checks++;
   await notification(payment,{Status:'CONFIRMED',Amount:1},400);await notification(payment,{Status:'CONFIRMED',PaymentId:'999999'},400);
-  await notification(payment,{Status:'AUTHORIZED'});assert.equal((await request(path)).billing.locked,true);
+  const notificationRequestId=await notification(payment,{Status:'AUTHORIZED'});
+  const webhook=readEvents().find(e=>e.event==='operation.completed'&&e.requestId===notificationRequestId);
+  assert.equal(webhook?.operationId,initEvent.operationId);
+  assert.notEqual(notificationRequestId,initEvent.requestId);checks++;
+  assert.equal((await request(path)).billing.locked,true);
   payment.Status='CONFIRMED';await notification(payment,{Amount:'19900'});await notification(payment);await notification(payment,{Status:'AUTHORIZED'});
   doc=await request(path);assert.equal(doc.billing.locked,false);assert.equal(doc.billing.aiRemaining,2);assert.match(JSON.stringify(doc),/PRIVATE-GENERATED/);
   assert.equal((await db.prepare("SELECT COUNT(*) count FROM payment_events WHERE order_id=? AND status='CONFIRMED'").bind(payment.OrderId).first()).count,1);

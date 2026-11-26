@@ -1,5 +1,5 @@
 import {env} from '../runtime';
-import {runOperation} from '../request-context.mjs';
+import {diagnostic} from '../diagnostics.mjs';
 import {SITE_MS} from '../payment-network.mjs';
 import {and,eq} from 'drizzle-orm';
 import {getDb} from '../../db';
@@ -7,7 +7,7 @@ import {documents} from '../../db/schema';
 import {CONTRACT_PRICE,hasAccess,presentContract} from './billing';
 import {runtime,HttpError} from './server';
 import {digest} from './auth';
-import {bankConfig,checkoutConfig,bankRequest,initParameters,paymentUrl,PaymentError,bankId,bankAmount,BANK_RANK,FAILED_BANK_STATUSES,successfulBankResponse,type BankData} from './tbank';
+import {withPaymentOrder,bankConfig,checkoutConfig,bankRequest,initParameters,paymentUrl,PaymentError,bankId,bankAmount,BANK_RANK,FAILED_BANK_STATUSES,successfulBankResponse,type BankData} from './tbank';
 
 type Order={id:string;document_id:string;owner:string;active_document:string|null;amount:number;terminal_key:string;payment_id:string|null;payment_url:string|null;status:string;status_rank:number;created_at:number;checked_at:number};
 const database=()=>env.DB!;
@@ -19,10 +19,20 @@ async function latestOrder(id:string,owner:string){return database().prepare('SE
 async function orderById(id:string){return database().prepare('SELECT * FROM payment_orders WHERE id=?').bind(id).first<Order>()}
 
 /** Called only after token verification or a direct authenticated bank API response. */
-export async function applyBankState(data:BankData){
+export async function applyBankState(data:BankData, source:'bank_response'|'notification'='bank_response'){
+  const started=performance.now();
   const paymentId=bankId(data.PaymentId),orderId=data.OrderId,status=data.Status,amount=bankAmount(data.Amount);
   if(typeof orderId!=='string'||typeof status!=='string'||!paymentId||amount===null)throw new PaymentError(400,'Неверный формат уведомления об оплате.');
   const order=await orderById(orderId);if(!order)throw new PaymentError(404,'Заказ не найден.');
+  return withPaymentOrder(order.id,async()=>{
+    await applyKnownBankState(data,order,paymentId,status,amount);
+    if(source==='notification'){
+      diagnostic('operation.completed',{component:'payments',stage:'payment',durationMs:Math.round(performance.now()-started)});
+    }
+  });
+}
+
+async function applyKnownBankState(data:BankData,order:Order,paymentId:string,status:string,amount:number){
   if(data.TerminalKey!==order.terminal_key||data.TerminalKey!==bankConfig(runtime()).terminalKey||(order.payment_id&&order.payment_id!==paymentId))throw new PaymentError(400,'Платёж не соответствует заказу.');
   const refund=status==='REFUNDED'||status==='PARTIAL_REFUNDED',cancelled=FAILED_BANK_STATUSES.includes(status);
   if(((refund||cancelled)&&(amount<0||amount>order.amount))||(!refund&&!cancelled&&amount!==order.amount))throw new PaymentError(400,'Сумма платежа не соответствует заказу.');
@@ -95,7 +105,7 @@ export async function checkout(documentId:string,owner:string,email:string){
   const config=checkoutConfig(runtime());
   const existing=await database().prepare('SELECT * FROM payment_orders WHERE active_document=? AND owner=?').bind(documentId,owner).first<Order>();
   if(existing){
-    const resumed=await runOperation(async()=>{
+    const resumed=await withPaymentOrder(existing.id,async()=>{
       await reconcile(existing,deadline);
       const order=(await orderById(existing.id))!;
       const current=await ownedDocument(documentId,owner);
@@ -105,11 +115,11 @@ export async function checkout(documentId:string,owner:string,email:string){
       const url=paymentUrl(order.payment_url);
       if(!url)throw new PaymentError(409,'Статус платежа уточняется. Нажмите «Проверить оплату». Повторный платёж пока не создаётся.');
       return {document:presentContract(current),paymentUrl:url};
-    },'o_'+existing.id);
+    });
     if(resumed)return resumed;
   }
   const id=crypto.randomUUID();
-  return runOperation(()=>createPayment(id,documentId,owner,email,config.terminalKey,deadline),'o_'+id);
+  return withPaymentOrder(id,()=>createPayment(id,documentId,owner,email,config.terminalKey,deadline));
 }
 
 async function createPayment(id:string,documentId:string,owner:string,email:string,terminalKey:string,deadline:number){
@@ -135,9 +145,12 @@ async function createPayment(id:string,documentId:string,owner:string,email:stri
 }
 export async function paymentStatus(documentId:string,owner:string){
   const deadline = performance.now()+SITE_MS;
-  await ownedDocument(documentId,owner);
+  const row=await ownedDocument(documentId,owner);
   const order=await latestOrder(documentId,owner);
-  if(order&&order.status!=='INIT_FAILED')await runOperation(()=>reconcile(order,deadline),'o_'+order.id);
-  const current=await ownedDocument(documentId,owner),updated=order?await orderById(order.id):null;
-  return {document:presentContract(current),status:updated?.status||'NOT_STARTED'};
+  if(!order)return {document:presentContract(row),status:'NOT_STARTED'};
+  return withPaymentOrder(order.id,async()=>{
+    if(order.status!=='INIT_FAILED')await reconcile(order,deadline);
+    const current=await ownedDocument(documentId,owner),updated=await orderById(order.id);
+    return {document:presentContract(current),status:updated?.status||'NOT_STARTED'};
+  });
 }
