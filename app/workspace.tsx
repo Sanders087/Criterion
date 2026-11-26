@@ -56,11 +56,11 @@ export default function Workspace(){
    try { sessionStorage.removeItem('criterion.checkout-pending.'+id); } catch { /* no storage available */ }
  }
  function applyPaymentCheck(next:Contract,status:string) {
-   if(next.billing?.checkRequired || ['INITIALIZING','INIT_OUTCOME_UNKNOWN'].includes(status)) return;
+   if(next.billing?.checkRequired || ['INITIALIZING','INIT_OUTCOME_UNKNOWN'].includes(status)) return false;
    const since=pendingRef.current.id===next.id ? pendingRef.current.since : checkoutTime(next.id);
    // A status read can race the original checkout before its order is reserved.
-   if(status==='NOT_STARTED' && since && Date.now()-since<30_000) return;
-   clearPending(next.id);
+   if(status==='NOT_STARTED' && since && Date.now()-since<30_000) return false;
+   clearPending(next.id);return true;
  }
  const [authRequired,setAuthRequired]=useState(false);
  const [authOpen,setAuthOpen]=useState(false);
@@ -131,7 +131,7 @@ export default function Workspace(){
  const filtered=(state?.documents||[]).filter(d=>(filter==='all'||d.stage===filter)&&d.title.toLowerCase().includes(query.toLowerCase()));
  const currentSections=previewVersion?doc?.versions.find(v=>v.number===previewVersion)?.sections:doc?.sections;
  const docDirty=!saved||edit||previewVersion!==null;
- async function checkPayment(id=doc?.id){if(!id||id==='example')return;paymentEpoch.current++;await run('Проверяем оплату',async()=>{const result=await api<{document:Contract;status:string}>('/api/payments/status','payment_status','POST',{documentId:id});applyPaymentCheck(result.document,result.status);sync(result.document);setPaymentNotice(result.document.billing?.state==='paid'?'Оплата подтверждена. Договор открыт.':result.status==='REFUNDED'?'Оплата возвращена.':result.status==='NOT_STARTED'?'Оплата ещё не начата.':['REJECTED','CANCELED','DEADLINE_EXPIRED','AUTH_FAIL','INIT_FAILED','REVERSED'].includes(result.status)?'Оплата не завершена. Можно повторить попытку.':'Ожидаем подтверждение банка. Договор откроется автоматически после оплаты.');await load()})}
+ async function checkPayment(id=doc?.id){if(!id||id==='example')return;paymentEpoch.current++;await run('Проверяем оплату',async()=>{const result=await api<{document:Contract;status:string}>('/api/payments/status','payment_status','POST',{documentId:id});const resolved=applyPaymentCheck(result.document,result.status);sync(result.document);setPaymentNotice(!resolved?'':result.document.billing?.state==='paid'?'Оплата подтверждена. Договор открыт.':result.status==='REFUNDED'?'Оплата возвращена.':result.status==='NOT_STARTED'?'Оплата ещё не начата.':['REJECTED','CANCELED','DEADLINE_EXPIRED','AUTH_FAIL','INIT_FAILED','REVERSED'].includes(result.status)?'Оплата не завершена. Можно повторить попытку.':'Ожидаем подтверждение банка. Договор откроется автоматически после оплаты.');await load()})}
  async function pay(receiptEmail:string){
   if(!doc||requestActive.current||doc.billing?.checkRequired||pendingId===doc.id)return;
   const id=doc.id;paymentEpoch.current++;markPending(id,Date.now());
