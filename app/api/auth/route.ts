@@ -30,7 +30,7 @@ export const POST = apiRoute('/api/auth', async (request:Request) => {
   const id=legacy?.userId||'email:'+crypto.randomUUID();
   if(await env.DB!.prepare('SELECT id FROM accounts WHERE id=?').bind(id).first())throw new HttpError(409,'Для прежнего аккаунта уже настроен вход по email. Войдите в него.');
   const salt=randomToken();recoveryCode=randomToken();const hash=await passwordHash(data.password,salt);
-  const result=await env.DB!.prepare('INSERT OR IGNORE INTO accounts (id,email,password_hash,salt,recovery_hash,created_at) VALUES (?,?,?,?,?,?)').bind(id,email,hash,salt,await digest(recoveryCode),now).run();
+  const result=await env.DB!.prepare('INSERT OR IGNORE INTO accounts (id,email,password_hash,salt,recovery_hash,created_at) VALUES (?,?,?,?,?,?)').bind(id,email,hash,salt,await digest(recoveryCode),now).run('auth.create_account');
   if(result.meta.changes!==1)throw new HttpError(409,'Аккаунт уже зарегистрирован. Войдите.');
   account={id,email,password_hash:hash,salt,recovery_hash:await digest(recoveryCode)};
  }else if(data.action==='recover'){

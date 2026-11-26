@@ -25,8 +25,8 @@ COPY --from=site-build --chown=criterion:criterion /app/.next/static/ ./.next/st
 COPY --from=site-build --chown=criterion:criterion /app/public/ ./public/
 COPY --chown=criterion:criterion drizzle/ ./drizzle/
 COPY --chown=criterion:criterion db/sqlite.mjs ./db/sqlite.mjs
-COPY --chown=criterion:criterion lib/diagnostics.mjs lib/diagnostic-*.mjs lib/request-context.mjs ./lib/
-COPY --chown=criterion:criterion scripts/start-site.mjs scripts/run-with-pii.mjs scripts/check-pii-endpoint.py scripts/backup-db.py scripts/storage-diagnostics.mjs ./scripts/
+COPY --chown=criterion:criterion lib/diagnostics.mjs lib/storage-monitor.mjs lib/payment-reconciliation.mjs lib/diagnostic-*.mjs lib/request-context.mjs ./lib/
+COPY --chown=criterion:criterion scripts/start-site.mjs scripts/run-with-pii.mjs scripts/check-pii-endpoint.py scripts/backup-db.py scripts/backup-schedule.mjs scripts/storage-diagnostics.mjs scripts/payment-reconciliation-review.mjs ./scripts/
 COPY --chown=criterion:criterion services/pii/__init__.py services/pii/app.py services/pii/detector.py ./services/pii/
 COPY deploy/amvera/entrypoint.py /entrypoint.py
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 PORT=3000     DATABASE_PATH=/data/criterion.sqlite MIGRATIONS_DIR=/app/drizzle SITE_HEALTH_PATH=/api/health     PII_PYTHON=/opt/pii/bin/python PATH=/opt/pii/bin:$PATH OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1

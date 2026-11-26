@@ -1,8 +1,9 @@
 // Runs in an isolated test container, never in a deployed service.
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
+import { chmodSync, readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs';
+import { setTimeout as delay } from 'node:timers/promises';
 const base = 'http://127.0.0.1:3000';
-const fixture = JSON.parse(readFileSync('/test/fixtures/pii-office-services-case.json', 'utf8'));
+const fixture = JSON.parse(readFileSync('/app/tests/fixtures/pii-office-services-case.json', 'utf8'));
 let cookie = '';
 async function api(path, method = 'GET', body, status = 200) {
   const response = await fetch(base + path, { method, headers: { cookie, Origin: 'https://criterion.test',
@@ -16,9 +17,19 @@ if (process.argv.includes('--persisted')) {
   const doc = await api('/api/documents/' + saved.id);
   assert.equal(doc.id, saved.id); assert.equal(doc.revision, saved.revision);
   assert.ok(doc.sections[0].content.includes(fixture.sensitive[0].text));
-  console.log('Container restart: account, session, document and restored PII persisted.');
+  console.log('Fresh container on the same test volume: account, session, document and restored PII persisted.');
 } else {
   assert.equal((await api('/api/health')).status, 'ready');
+  assert.equal((await api('/api/health/ready')).status, 'ready');
+  const databasePath = process.env.DATABASE_PATH, mode = statSync(databasePath).mode & 0o777;
+  try {
+    chmodSync(databasePath, 0o400);
+    await delay(2100);
+    assert.equal((await api('/api/health/ready', 'GET', undefined, 503)).status, 'unavailable');
+    assert.equal((await api('/api/health/live')).status, 'ok');
+  } finally { chmodSync(databasePath, mode); }
+  await delay(2100);
+  assert.equal((await api('/api/health/ready')).status, 'ready');
   const pythonPid = readdirSync('/proc').filter(name => /^\d+$/.test(name)).find(name => {
     try { return readFileSync('/proc/' + name + '/cmdline', 'utf8').includes('services.pii.app:create_app'); } catch { return false; }
   });

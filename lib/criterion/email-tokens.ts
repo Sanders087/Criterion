@@ -54,7 +54,7 @@ async function deliverEmail(accountId: string, mailType: MailType, operationId: 
       .bind(hash, accountId, account.email, mailType, account.password_hash, now + (mailType === 'verify' ? 86400000 : 1800000)),
     db.prepare("INSERT INTO mail_attempts(operation_id,mail_type,status,created_at,updated_at) VALUES (?,?,'OUTCOME_UNKNOWN',?,?)")
       .bind(operationId,mailType,now,now),
-  ]);
+  ], 'auth.issue_email_token');
   const started = performance.now();
   diagnostic('mail.send_started', {mailType});
   let providerMessageId: string;

@@ -1,0 +1,80 @@
+groups:
+  - name: criterion
+    rules:
+      - alert: CriterionMetricsDown
+        expr: up{job="criterion"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Сбор метрик Criterion прерван"
+      - alert: CriterionServerErrors
+        expr: sum(rate(http_requests_total{job="criterion",status=~"5.."}[5m])) / clamp_min(sum(rate(http_requests_total{job="criterion"}[5m])), 0.01) > 0.05 and sum(increase(http_requests_total{job="criterion",status=~"5.."}[5m])) >= 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Растёт доля серверных ошибок"
+      - alert: CriterionGatewayTimeouts
+        expr: sum by (component) (increase(payment_gateway_timeouts_total{job="criterion"}[10m])) >= 3
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Повторяются таймауты платежей"
+      - alert: CriterionPaidWithoutAccess
+        expr: payment_confirmed_without_access{job="criterion"} > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Есть подтверждённые оплаты без доступа к договору"
+      - alert: CriterionDbUnavailable
+        expr: sqlite_available{job="criterion"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SQLite недоступна"
+      - alert: CriterionDiskLow
+        expr: storage_free_bytes{job="criterion"} < 268435456 or storage_writable{job="criterion"} == 0
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Недостаточно места или том недоступен для записи"
+      - alert: CriterionWalGrowing
+        expr: sqlite_wal_size_bytes{job="criterion"} > 134217728
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Размер WAL превышает 128 МиБ"
+      - alert: CriterionMailFailures
+        expr: sum(increase(mail_send_total{job="criterion",result=~"unknown|rejected"}[10m])) >= 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Участились сбои отправки писем"
+      - alert: CriterionPrivacyFailures
+        expr: sum(increase(pii_failures_total{job="criterion"}[10m])) >= 3
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Участились ошибки обезличивания"
+      - alert: CriterionAiFailures
+        expr: sum(increase(ai_requests_total{job="criterion",result="failure"}[10m])) >= 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Повторяются ошибки ИИ"
+      - alert: CriterionBackupOverdue
+        expr: (time() - backup_last_success_timestamp_seconds{job="criterion"} > 93600) or (backup_last_success_timestamp_seconds{job="criterion"} != backup_last_success_timestamp_seconds{job="criterion"}) or backup_last_run_failed{job="criterion"} == 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Резервная копия отсутствует, просрочена или завершилась ошибкой"

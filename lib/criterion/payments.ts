@@ -1,6 +1,7 @@
 import {env} from '../runtime';
 import {diagnostic} from '../diagnostics.mjs';
 import {SITE_MS} from '../payment-network.mjs';
+import {claimPaymentCheck,releasePaymentCheck} from '../payment-reconciliation.mjs';
 import {and,eq} from 'drizzle-orm';
 import {getDb} from '../../db';
 import {documents} from '../../db/schema';
@@ -77,24 +78,39 @@ export async function applyBankState(data:BankData, source:'bank_response'|'noti
         const changed = current.status !== status;
         if (changed || !current.payment_id) {
           db.prepare(`UPDATE payment_orders SET payment_id=?,status=?,status_rank=?,updated_at=?,first_missing_at=0,
+            reconcile_attempts=CASE WHEN status<>? THEN 0 ELSE reconcile_attempts END,
+            reconcile_next_at=CASE WHEN status<>? THEN 0 ELSE reconcile_next_at END,
             active_document=CASE WHEN ? THEN NULL ELSE active_document END WHERE id=?`)
-            .bind(paymentId,status,BANK_RANK[status],Date.now(),FAILED_BANK_STATUSES.includes(status)?1:0,current.id).run();
+            .bind(paymentId,status,BANK_RANK[status],Date.now(),status,status,FAILED_BANK_STATUSES.includes(status)?1:0,current.id).run();
         }
+        const eventId=crypto.randomUUID();
         const added = db.prepare('INSERT OR IGNORE INTO payment_events (id,order_id,status,amount,created_at) VALUES (?,?,?,?,?)')
-          .bind(crypto.randomUUID(),current.id,status,amount,Date.now()).run().meta.changes;
+          .bind(eventId,current.id,status,amount,Date.now()).run().meta.changes;
         let granted = false;
         if (status === 'CONFIRMED' || status === 'PARTIAL_REFUNDED') {
           grantPhase = true;
           granted = db.prepare("UPDATE documents SET billing_state='paid' WHERE id=? AND owner=? AND billing_state='unpaid'")
-            .bind(current.document_id,current.owner).run().meta.changes === 1;
-          const doc = db.prepare('SELECT billing_state FROM documents WHERE id=? AND owner=?').bind(current.document_id,current.owner).first();
-          if (!doc || !hasAccess(String(doc.billing_state))) throw new Error('Access update incomplete');
+            .bind(current.document_id,current.owner).run('payment.grant_access').meta.changes === 1;
+          const doc = db.prepare('SELECT billing_state,owner FROM documents WHERE id=?').bind(current.document_id).first();
+          if (doc) {
+            if (doc.owner!==current.owner || !hasAccess(String(doc.billing_state))) throw new Error('Access update incomplete');
+          } else {
+            // The user can delete a paid document while its financial audit history survives.
+            // The current event alone cannot prove that access was previously granted.
+            const appliedBefore = wasPaid && db.prepare(`SELECT 1 FROM payment_events WHERE order_id=? AND id<>?
+              AND status IN ('CONFIRMED','PARTIAL_REFUNDED') LIMIT 1`).bind(current.id,eventId).first();
+            if (!appliedBefore) throw new Error('Access update incomplete');
+          }
         } else if (status === 'REFUNDED') {
           db.prepare("UPDATE documents SET billing_state='refunded' WHERE id=? AND owner=? AND billing_state IN ('unpaid','paid')")
             .bind(current.document_id,current.owner).run();
         }
+        // An earlier intermediate reply can arrive after a failed confirmation.
+        // Keep recovery scheduled until a verified final state is fully applied.
+        if (refund || status==='CONFIRMED' || FAILED_BANK_STATUSES.includes(status))
+          db.prepare('UPDATE payment_orders SET notification_failed_at=0 WHERE id=? AND notification_failed_at<>0').bind(current.id).run();
         return {kind:'applied',previousStatus:current.status,changed,duplicate:added===0,granted};
-      });
+      }, source === 'notification' ? 'payment.apply_notification' : 'payment.apply_bank_state');
       if (outcome.kind === 'mismatch') return reject('payment_mismatch','Платёж не соответствует заказу.');
       if (outcome.kind === 'stale') {
         if (notification) diagnostic('payment.notification_rejected',{reason:'stale_status'},'warn');
@@ -107,20 +123,22 @@ export async function applyBankState(data:BankData, source:'bank_response'|'noti
     } catch(cause) {
       if (cause instanceof PaymentError) throw cause;
       if (grantPhase) diagnostic('payment.access_grant_failed',{errorCode:'PAYMENT_ACCESS_ERROR',retryable:false},'error');
-      if (notification) diagnostic('payment.notification_rejected',{reason:grantPhase?'access_grant':'database',errorCode:normalizeError(cause).code},'error');
+      if (notification) {
+        diagnostic('payment.notification_rejected',{reason:grantPhase?'access_grant':'database',errorCode:normalizeError(cause).code},'error');
+        // Best effort while SQLite is available. A full storage outage still returns a failing HTTP response to the bank.
+        try { db.prepare(`UPDATE payment_orders SET notification_failed_at=?,reconcile_attempts=0,reconcile_next_at=0
+          WHERE id=? AND notification_failed_at=0`).bind(Date.now(),order.id).run(); }
+        catch (failure) { diagnostic('payment.reconciliation_failed',{errorCode:normalizeError(failure).code},'error'); }
+      }
       throw cause;
     }
   });
 }
 
-async function reconcile(order:Order, deadline:number){
+async function reconcile(order:Order, deadline:number, now:number, allowCancel:boolean){
   const request = (method:'GetState'|'Cancel'|'CheckOrder', params:BankData) =>
     bankRequest(runtime(),method,params,deadline);
   if(order.terminal_key!==bankConfig(runtime()).terminalKey)throw new PaymentError(503,'Проверка этого платежа временно недоступна. Обратитесь в поддержку.');
-  const now=Date.now();
-  if (['INITIALIZING','INIT_OUTCOME_UNKNOWN'].includes(order.status) && order.created_at>now-30000) return;
-  const claim=await database().prepare('UPDATE payment_orders SET checked_at=? WHERE id=? AND checked_at<?').bind(now,order.id,now-5000).run();
-  if(claim.meta.changes!==1)return;
   // The process can stop after dispatching Init and before recording its outcome.
   if (order.status==='INITIALIZING') {
     const changed = database().prepare(`UPDATE payment_orders SET status='INIT_OUTCOME_UNKNOWN',updated_at=?
@@ -171,6 +189,7 @@ async function reconcile(order:Order, deadline:number){
   // Validate the exact ID requested as well as the immutable order/amount.
   if(result.OrderId!==order.id||bankId(result.PaymentId)!==paymentId)throw new PaymentError(502,'Ответ банка не соответствует платежу.');
   await applyBankState(result);
+  if (!allowCancel) return;
   // If Init's response was lost, the customer never received a payment link.
   // Only an untouched NEW payment may be cancelled automatically. A new order
   // is allowed only after GetState confirms that the old payment is closed.
@@ -188,15 +207,31 @@ async function reconcile(order:Order, deadline:number){
   }
 }
 
-async function checkOrder(order:Order, deadline:number) {
+async function checkOrder(order:Order, deadline:number, backgroundClaim?:number) {
+  const now=backgroundClaim ?? Date.now();
+  if (backgroundClaim===undefined) {
+    const fresh=['INITIALIZING','INIT_OUTCOME_UNKNOWN'].includes(order.status) && order.created_at>now-30000;
+    if (fresh || !claimPaymentCheck(database(),order.id,now)) {
+      diagnostic('payment.status_checked',{status:order.status});
+      return;
+    }
+  }
   try {
-    await reconcile(order, deadline);
+    await reconcile(order, deadline, now, backgroundClaim===undefined);
     const current = await orderById(order.id);
     diagnostic('payment.status_checked',{status:current?.status});
   } catch(cause) {
     diagnostic('payment.reconciliation_failed',{errorCode:normalizeError(cause).code},'error');
     throw cause;
+  } finally {
+    if (backgroundClaim===undefined) releasePaymentCheck(database(),order.id,now);
   }
+}
+
+// The worker has reserved this immutable order and its attempt in SQLite before calling here.
+export async function backgroundPaymentCheck(id:string,claimedAt:number) {
+  const order=await orderById(id);
+  if (order) await checkOrder(order,performance.now()+SITE_MS,claimedAt);
 }
 
 export async function checkout(documentId:string,owner:string,email:string){
@@ -242,7 +277,7 @@ async function createPayment(id:string,documentId:string,owner:string,email:stri
     throw error;
   }
   const created=await database().prepare("INSERT OR IGNORE INTO payment_orders (id,document_id,owner,active_document,amount,terminal_key,status,status_rank,created_at,updated_at,checked_at) SELECT ?,id,owner,id,?,?,'INITIALIZING',0,?,?,0 FROM documents WHERE id=? AND owner=? AND billing_state='unpaid' AND (lock_until IS NULL OR lock_until<?)")
-    .bind(id,CONTRACT_PRICE,terminalKey,now,now,documentId,owner,now).run();
+    .bind(id,CONTRACT_PRICE,terminalKey,now,now,documentId,owner,now).run('payment.create_order');
   if(created.meta.changes!==1)throw new PaymentError(409,'Платёж уже создаётся. Нажмите «Проверить оплату».');
   diagnostic('payment.order_created');
   diagnostic('payment.init_started');

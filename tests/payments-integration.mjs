@@ -67,17 +67,25 @@ try{
   await request(path,'PATCH',{action:'delete',revision:doc.revision},409);
   const bad={...payment,Status:'CONFIRMED',Token:'0'.repeat(64)};assert.equal((await mf.dispatchFetch('https://criterion.test/api/payments/tbank/notification',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(bad)})).status,403);checks++;
   await notification(payment,{Status:'CONFIRMED',Amount:1},400);await notification(payment,{Status:'CONFIRMED',PaymentId:'999999'},400);
+  await db.prepare('UPDATE payment_orders SET reconcile_attempts=6 WHERE id=?').bind(payment.OrderId).run();
   const notificationRequestId=await notification(payment,{Status:'AUTHORIZED'});
+  assert.equal(db.prepare('SELECT reconcile_attempts AS n FROM payment_orders WHERE id=?').bind(payment.OrderId).first().n,0);
   const webhook=readEvents().find(e=>e.event==='payment.notification_received'&&e.requestId===notificationRequestId);
   assert.equal(webhook?.operationId,initEvent.operationId);
   assert.notEqual(notificationRequestId,initEvent.requestId);checks++;
   assert.equal((await request(path)).billing.locked,true);
   payment.Status='CONFIRMED';
   await db.prepare("CREATE TRIGGER simulate_grant_failure BEFORE UPDATE OF billing_state ON documents WHEN NEW.billing_state='paid' BEGIN SELECT RAISE(ABORT,'fixture'); END").run();
+  await db.prepare('UPDATE payment_orders SET reconcile_attempts=6 WHERE id=?').bind(payment.OrderId).run();
   const failedGrant=await notification(payment,{},500);
   assert.ok(readEvents().some(e=>e.event==='payment.access_grant_failed'&&e.requestId===failedGrant));
   assert.equal((await db.prepare('SELECT status FROM payment_orders WHERE id=?').bind(payment.OrderId).first()).status,'AUTHORIZED');
   assert.equal((await db.prepare('SELECT billing_state FROM documents WHERE id=?').bind(doc.id).first()).billing_state,'unpaid');
+  const recovery=db.prepare('SELECT notification_failed_at,reconcile_attempts FROM payment_orders WHERE id=?').bind(payment.OrderId).first();
+  assert.ok(recovery.notification_failed_at>0);assert.equal(recovery.reconcile_attempts,0);
+  db.prepare('UPDATE payment_orders SET reconcile_attempts=3 WHERE id=?').bind(payment.OrderId).run();
+  await notification(payment,{},500);
+  assert.equal(db.prepare('SELECT reconcile_attempts AS n FROM payment_orders WHERE id=?').bind(payment.OrderId).first().n,3);
   await db.prepare('DROP TRIGGER simulate_grant_failure').run();
   const grantedId=await notification(payment,{Amount:'19900'});
   assert.ok(readEvents().some(e=>e.event==='payment.access_granted'&&e.requestId===grantedId));
@@ -128,6 +136,19 @@ try{
   assert.ok(readEvents().some(e=>e.event==='payment.init_outcome_unknown' && e.errorCode==='BANK_TIMEOUT' && e.requestId===timeoutResult.requestId));
   const lost=[...bankPayments.values()].at(-1);lost.Status='CONFIRMED';await db.prepare('UPDATE payment_orders SET created_at=?,checked_at=0 WHERE id=?').bind(Date.now()-60000,lost.OrderId).run();
   const recovered=await request('/api/payments/status','POST',{documentId:second.id});assert.equal(recovered.document.billing.state,'paid');assert.equal(initCount,beforeLost+1);checks++;
+  // The original committed event survives legitimate deletion. A duplicate never recreates the document.
+  await request('/api/documents/'+second.id,'PATCH',{action:'delete',revision:recovered.document.revision});
+  const archivedNotification=await notification(lost);
+  assert.ok(readEvents().some(e=>e.event==='payment.notification_duplicate'&&e.requestId===archivedNotification));
+  assert.equal(db.prepare('SELECT id FROM documents WHERE id=?').bind(second.id).first(),null);
+  assert.equal(db.prepare('SELECT status FROM payment_orders WHERE id=?').bind(lost.OrderId).first().status,'CONFIRMED');
+  // A first confirmation with a missing access target must still roll back and request replay.
+  const orphanId=randomUUID(),absentDoc=randomUUID();
+  db.prepare(`INSERT INTO payment_orders(id,document_id,owner,active_document,amount,terminal_key,payment_id,status,status_rank,created_at,updated_at)
+    VALUES(?,?,?,?,19900,?,'999801','AUTHORIZED',10,?,?)`).bind(orphanId,absentDoc,owner,absentDoc,terminal,Date.now(),Date.now()).run();
+  await notification({...lost,OrderId:orphanId,PaymentId:'999801'}, {},500);
+  assert.equal(db.prepare('SELECT status FROM payment_orders WHERE id=?').bind(orphanId).first().status,'AUTHORIZED');
+  assert.equal(db.prepare('SELECT count(*) AS n FROM payment_events WHERE order_id=?').bind(orphanId).first().n,0);
   // An unshown NEW link is safely cancelled before retry; charged payments are never auto-refunded.
   let third=await request('/api/documents','POST',{kind:'services',mode:'ai'},201);third=await request('/api/documents/'+third.id,'PATCH',{action:'generate',revision:0});lostInit=true;
   await request('/api/payments/checkout','POST',{documentId:third.id},502);lostInit=false;
