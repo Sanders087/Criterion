@@ -1,4 +1,8 @@
 import { Buffer } from 'node:buffer';
+import { AppError } from './app-error.ts';
+import { diagnostic } from '../diagnostics.mjs';
+import { getRequestContext } from '../request-context.mjs';
+import { SITE_MS, networkCode, retryableRead, traceInput, isBankCode, validBankEnvelope } from '../payment-network.mjs';
 import { CONTRACT_PRICE } from './billing.ts';
 
 export type TBankEnv = {
@@ -8,9 +12,12 @@ export type TBankEnv = {
   TBANK_GATEWAY_URL?:string; TBANK_GATEWAY_SECRET?:string; TBANK_MODE?:string;
   TBANK_NOTIFICATION_URL?:string;
 };
-export class PaymentError extends Error {
-  status:number;
-  constructor(status:number,message:string){super(message);this.status=status}
+type PaymentDetails = { code?:string; stage?:string; cause?:unknown; retryable?:boolean; upstreamStatus?:number };
+export class PaymentError extends AppError {
+  constructor(status:number, message:string, details:PaymentDetails = {}) {
+    const code = details.code ?? (status === 503 ? 'PAYMENT_UNAVAILABLE' : 'PAYMENT_ERROR');
+    super({ ...details, status, code, publicMessage:message, service:'payments', stage:details.stage ?? 'payment' });
+  }
 }
 export type BankData = Record<string,unknown>;
 const API_URLS=['https://securepay.tinkoff.ru/v2/','https://rest-api-test.tinkoff.ru/v2/'];
@@ -27,7 +34,7 @@ function bankPassword(env:TBankEnv){
     if(bytes.toString('base64')!==encoded)throw new Error();
     // Preserve every character, including leading/trailing whitespace and a UTF-8 BOM.
     return new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(bytes);
-  }catch{throw new PaymentError(503,'Оплата пока недоступна. Настройки банка ещё не завершены.')}
+  }catch(cause){throw new PaymentError(503,'Оплата пока недоступна. Настройки банка ещё не завершены.',{cause})}
 }
 export function bankConfig(env:TBankEnv){
   const terminalKey=env.TBANK_TERMINAL_KEY?.trim(),password=bankPassword(env);
@@ -42,13 +49,13 @@ export function bankConfig(env:TBankEnv){
       const live=env.TBANK_MODE==='live'&&/^\d{5,24}$/.test(terminalKey)&&url.pathname==='/criterion-tbank-live/';
       if(url.origin!=='https://srv678677.hstgr.cloud'||(!demo&&!live)||url.username||url.password||url.search||url.hash||!env.TBANK_GATEWAY_SECRET?.match(/^[a-f0-9]{64}$/)||apiUrl!==API_URLS[0])throw new Error('Invalid gateway');
       gatewayUrl=url.href;
-    }catch{throw new PaymentError(503,'Оплата пока недоступна. Соединение с банком ещё не настроено.')}
+    }catch(cause){throw new PaymentError(503,'Оплата пока недоступна. Соединение с банком ещё не настроено.',{cause})}
   }
   return {terminalKey,password,apiUrl,gatewayUrl};
 }
 export function checkoutConfig(env:TBankEnv){
   const config=bankConfig(env);
-  let origin:URL;try{origin=new URL(env.TBANK_PUBLIC_URL||'')}catch{throw new PaymentError(503,'Оплата пока недоступна. Адрес магазина не настроен.')}
+  let origin:URL;try{origin=new URL(env.TBANK_PUBLIC_URL||'')}catch(cause){throw new PaymentError(503,'Оплата пока недоступна. Адрес магазина не настроен.',{cause})}
   if(env.TBANK_ENABLED!=='true'||origin.protocol!=='https:'||origin.username||origin.password||origin.pathname!=='/'||origin.search||origin.hash)throw new PaymentError(503,'Оплата пока недоступна. Подключение магазина ещё не завершено.');
   if(!['bank','external'].includes(env.TBANK_RECEIPT_MODE||''))throw new PaymentError(503,'Оплата пока недоступна. Формирование чеков ещё не настроено.');
   if(env.TBANK_RECEIPT_MODE==='bank'&&(!taxation.includes(env.TBANK_TAXATION||'')||!taxes.includes(env.TBANK_TAX||'')||!['full_payment','full_prepayment'].includes(env.TBANK_PAYMENT_METHOD||'')||!['service','intellectual_activity','property_rights'].includes(env.TBANK_PAYMENT_OBJECT||'')))throw new PaymentError(503,'Оплата пока недоступна. Параметры чека ещё не настроены.');
@@ -72,7 +79,7 @@ export function paymentUrl(value:unknown){
   if(typeof value!=='string')return null;
   try{const url=new URL(value);return url.protocol==='https:'&&!url.username&&!url.password&&!url.port&&PAYMENT_HOSTS.includes(url.hostname)?url.href:null}catch{return null}
 }
-export async function bankRequest(env:TBankEnv,method:'Init'|'GetState'|'CheckOrder'|'Cancel',params:BankData):Promise<BankData>{
+export async function bankRequest(env:TBankEnv,method:'Init'|'GetState'|'CheckOrder'|'Cancel',params:BankData, deadline = performance.now()+SITE_MS):Promise<BankData>{
   const config=bankConfig(env);const payload={...params,TerminalKey:config.terminalKey};
   const body=JSON.stringify({...payload,Token:await bankToken(payload,config.password)});
   const headers:Record<string,string>={'Content-Type':'application/json'};
@@ -84,18 +91,48 @@ export async function bankRequest(env:TBankEnv,method:'Init'|'GetState'|'CheckOr
     const key=await crypto.subtle.importKey('raw',bytes,{name:'HMAC',hash:'SHA-256'},false,['sign']);
     const signed=await crypto.subtle.sign('HMAC',key,new TextEncoder().encode(`${timestamp}\n${nonce}\n${method}\n${body}`));
     headers['X-Criterion-Timestamp']=timestamp;headers['X-Criterion-Nonce']=nonce;
-    headers['X-Criterion-Signature']=Array.from(new Uint8Array(signed),b=>b.toString(16).padStart(2,'0')).join('');
+    headers['X-Criterion-Signature']=Buffer.from(signed).toString('hex');
+    const { requestId, operationId } = getRequestContext() ?? {};
+    if (requestId && operationId) {
+      headers['X-Request-ID'] = requestId;
+      headers['X-Operation-ID'] = operationId;
+      const trace = traceInput(headers['X-Criterion-Signature'], requestId, operationId);
+      headers['X-Criterion-Trace-Signature'] = Buffer.from(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(trace))).toString('hex');
+    }
   }
+  const gateway = Boolean(config.gatewayUrl);
+  const fields = {component:'payment_site', stage:gateway ? 'gateway_request' : 'bank_request', bankMethod:method};
+  const started = performance.now();
+  const fail = (code:string,cause?:unknown,status?:number) => {
+    // On forwarded failures, the HTTP status belongs to the gateway rather than the bank.
+    const retryable = retryableRead(method,code,gateway && code.startsWith('BANK_') ? undefined : status);
+    const stage = code.endsWith('_NETWORK_ERROR') ? 'unknown' : fields.stage;
+    diagnostic('payment.transport_failed', {...fields,stage,errorCode:code,upstreamStatus:status,retryable,durationMs:Math.round(performance.now()-started)},'error');
+    return new PaymentError(502,'Не удалось получить подтверждение банка. Проверьте статус оплаты перед повторной попыткой.', {code,stage,cause,retryable,upstreamStatus:status});
+  };
+  diagnostic('payment.transport_started', fields);
+  const remaining = Math.min(SITE_MS, Math.ceil(deadline - performance.now()));
+  if (remaining <= 0) throw fail(gateway ? 'GATEWAY_TIMEOUT' : 'BANK_TIMEOUT');
   let response:Response;
-  try{response=await fetch(url,{method:'POST',headers,body,signal:AbortSignal.timeout(15000),redirect:'manual'})}
-  catch{throw new PaymentError(502,'Банк пока не ответил. Проверьте статус оплаты перед повторной попыткой.')}
-  if(!response.ok){
-    // Record only transport metadata; never log signed requests or payment data.
-    console.error('TBank upstream request failed',{method,httpStatus:response.status,server:response.headers.get('server'),contentType:response.headers.get('content-type')});
-    throw new PaymentError(502,'Банк временно недоступен. Проверьте статус оплаты позже.');
+  try {
+    response = await fetch(url,{method:'POST',headers,body,signal:AbortSignal.timeout(remaining),redirect:'manual'});
+  } catch(cause) { throw fail(networkCode(cause,gateway),cause); }
+  const status = response.status;
+  if (!response.ok) {
+    const bankCode = response.headers.get('x-criterion-bank-error');
+    await response.body?.cancel().catch(() => {});
+    throw fail(gateway && bankCode && isBankCode(bankCode) ? bankCode : gateway ? 'GATEWAY_HTTP_ERROR' : 'BANK_HTTP_ERROR',undefined,status);
   }
-  let data:BankData;try{data=await response.json() as BankData}catch{throw new PaymentError(502,'Не удалось прочитать ответ банка. Проверьте статус оплаты позже.')}
-  if(!data||typeof data!=='object'||Array.isArray(data))throw new PaymentError(502,'Не удалось прочитать ответ банка.');
+  const invalid = gateway ? 'GATEWAY_RESPONSE_INVALID' : 'BANK_RESPONSE_INVALID';
+  let data:BankData;
+  try { data = await response.json() as BankData; }
+  catch(cause) { throw fail(cause instanceof SyntaxError ? invalid : networkCode(cause,gateway,true),cause,status); }
+  if (!validBankEnvelope(data)) throw fail(invalid,undefined,status);
+  const rejected = data.Success === false;
+  diagnostic(rejected ? 'payment.transport_failed' : 'payment.transport_completed',
+    {...fields,upstreamStatus:status,durationMs:Math.round(performance.now()-started),
+     ...(rejected ? {errorCode:'BANK_REQUEST_REJECTED',retryable:false} : {})},rejected ? 'warn' : 'info');
+  // The caller reconciles documented bank refusals (including CheckOrder 335).
   return data;
 }
 export function initParameters(env:TBankEnv,orderId:string,documentId:string,email:string):BankData {

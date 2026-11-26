@@ -1,7 +1,11 @@
 import http from 'node:http';
 import https from 'node:https';
 import { rootCertificates } from 'node:tls';
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { diagnostic } from '../../lib/diagnostics.mjs';
+import { isTechnicalErrorCode } from '../../lib/diagnostic-schema.mjs';
+import { runTrustedContext, validRequestId, validOperationId } from '../../lib/request-context.mjs';
+import { BANK_MS, CONNECT_MS, networkCode, retryableRead, traceInput, validBankEnvelope } from '../../lib/payment-network.mjs';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
@@ -53,30 +57,125 @@ export function signature(secret, timestamp, nonce, method, body) {
     .update(`${timestamp}\n${nonce}\n${method}\n${body}`).digest('hex');
 }
 
-export function bankTransport() {
+class BankTransportError extends Error {
+  constructor(code, cause) {
+    super(code, { cause });
+    this.code = code;
+  }
+}
+
+function traceContext(headers, paymentSignature, secret) {
+  const requestId = headers['x-request-id'], operationId = headers['x-operation-id'];
+  const mac = headers['x-criterion-trace-signature'];
+  if (validRequestId(requestId) && validOperationId(operationId) && typeof mac === 'string' && /^[a-f0-9]{64}$/.test(mac)) {
+    const expected = createHmac('sha256', Buffer.from(secret,'hex'))
+      .update(traceInput(paymentSignature, requestId, operationId)).digest();
+    if (timingSafeEqual(expected,Buffer.from(mac,'hex'))) return { requestId, operationId };
+  }
+  // Previous site releases authenticate the payment without attaching a trace.
+  return { requestId:'r_' + randomUUID(), operationId:'o_' + randomUUID() };
+}
+
+function bankAgent() {
   const names = ['russian_trusted_root_ca_pem.crt', 'russian_trusted_sub_ca_2024_pem.crt', 'russian_trusted_sub_ca_pem.crt'];
-  // Additional CAs apply ONLY to this fixed bank connection. System trust is untouched.
-  const agent = new https.Agent({ keepAlive: true, maxSockets: 8, proxyEnv: process.env,
-    ca: [...rootCertificates, ...names.map(name => readFileSync(new URL(`./certs/${name}`, import.meta.url), 'utf8'))] });
-  return (method, body) => new Promise((resolve, reject) => {
-    const request = https.request(`https://securepay.tinkoff.ru/v2/${method}`, {
+  return new https.Agent({ keepAlive: true, maxSockets: 8, proxyEnv: process.env,
+    ca: [...rootCertificates, ...names.map(name => readFileSync(new URL('./certs/' + name, import.meta.url), 'utf8'))] });
+}
+
+export function bankTransport({ send = https.request, agent = bankAgent(), connectMs = CONNECT_MS, totalMs = BANK_MS } = {}) {
+  return (method, body, timing = {}) => new Promise((resolve, reject) => {
+    const start = performance.now();
+    const elapsed = from => Math.round(performance.now() - from);
+    let socket, assigned, lookup, connected, headersAt, settled = false;
+    let connectTimer, totalTimer;
+
+    function recordFamily() {
+      if (socket.remoteFamily === 'IPv4' || socket.remoteFamily === 'IPv6') timing.addressFamily = socket.remoteFamily;
+    }
+    function onLookup() {
+      if (lookup !== undefined) return;
+      lookup = performance.now();
+      timing.dnsDurationMs = Math.round(lookup - assigned);
+    }
+    function onConnect() {
+      connected = performance.now();
+      timing.tcpDurationMs = Math.round(connected - (lookup ?? assigned));
+      recordFamily();
+    }
+    function onSecure() {
+      clearTimeout(connectTimer);
+      if (connected !== undefined) timing.tlsDurationMs = elapsed(connected);
+      recordFamily();
+    }
+    function finish(error, value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(connectTimer);
+      clearTimeout(totalTimer);
+      socket?.off('lookup',onLookup);
+      socket?.off('connect',onConnect);
+      socket?.off('secureConnect',onSecure);
+      if (headersAt !== undefined) timing.responseReadDurationMs = elapsed(headersAt);
+      if (error) reject(error);
+      else resolve(value);
+    }
+    const request = send('https://securepay.tinkoff.ru/v2/' + method, {
       agent, method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-      signal: AbortSignal.timeout(12000),
     }, response => {
-      // No redirects, cookies, or upstream response headers are forwarded.
-      if (response.statusCode !== 200) { response.resume(); reject(new Error('Bank transport failed')); return; }
-      const chunks = []; let size = 0;
-      response.on('data', chunk => { size += chunk.length; if (size > RESPONSE_LIMIT) request.destroy(new Error('Bank response too large')); else chunks.push(chunk); });
-      response.on('error', reject);
-      response.on('end', () => {
+      headersAt = performance.now();
+      timing.ttfbMs = Math.round(headersAt - start);
+      timing.upstreamStatus = response.statusCode;
+      const interrupted = cause => finish(new BankTransportError('BANK_RESPONSE_INTERRUPTED',cause));
+      response.once('error', interrupted);
+      response.once('aborted', interrupted);
+      if (response.statusCode !== 200) {
+        finish(new BankTransportError('BANK_HTTP_ERROR'));
+        response.destroy();
+        return;
+      }
+      const chunks = [];
+      let size = 0;
+      response.on('data', chunk => {
+        size += chunk.length;
+        if (size > RESPONSE_LIMIT) {
+          finish(new BankTransportError('BANK_RESPONSE_INVALID'));
+          response.destroy();
+        } else chunks.push(chunk);
+      });
+      response.once('end', () => {
+        if (settled) return;
         try {
-          const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-          if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid bank response');
-          resolve(value);
-        } catch { reject(new Error('Invalid bank response')); }
+          const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          if (!validBankEnvelope(data)) throw new BankTransportError('BANK_RESPONSE_INVALID');
+          finish(null, data);
+        } catch (cause) {
+          finish(cause instanceof BankTransportError ? cause : new BankTransportError('BANK_RESPONSE_INVALID',cause));
+        }
       });
     });
-    request.on('error', reject);
+    const expire = code => {
+      const error = new BankTransportError(code);
+      finish(error);
+      request.destroy(error);
+    };
+    totalTimer = setTimeout(() => expire('BANK_TIMEOUT'), totalMs);
+    request.once('socket', value => {
+      socket = value;
+      assigned = performance.now();
+      // A pool may hand over an already connected socket without setting reusedSocket.
+      timing.connectionReused = request.reusedSocket || (!socket.connecting && socket.encrypted && !socket.secureConnecting);
+      if (timing.connectionReused) {
+        clearTimeout(connectTimer);
+        recordFamily();
+      } else {
+        connectTimer = setTimeout(() => expire('BANK_CONNECT_TIMEOUT'), connectMs);
+        socket.once('lookup', onLookup);
+        socket.once('connect', onConnect);
+        socket.once('secureConnect', onSecure);
+      }
+    });
+    request.once('error', cause => finish(cause instanceof BankTransportError ? cause
+      : new BankTransportError(networkCode(cause, false, headersAt !== undefined), cause)));
     request.end(body);
   });
 }
@@ -130,7 +229,30 @@ export function createGateway(config, forward = bankTransport(), now = () => Dat
           typeof payload.Token !== 'string' || !/^[a-f0-9]{64}$/i.test(payload.Token) || Object.hasOwn(payload, 'Password') ||
           (method === 'Init' && payload.Amount !== 19900)) { send(400, { error: 'Invalid payment' }); return; }
       seen.set(nonce, now() + WINDOW_SECONDS * 2000);
-      send(200, await forward(method, body));
+      const context = traceContext(request.headers,actual,config.secret);
+      await runTrustedContext(context, async () => {
+        const started = performance.now();
+        const timing = {};
+        const fields = {component:'payment_gateway', stage:'bank_request', bankMethod:method};
+        diagnostic('payment.transport_started', fields);
+        try {
+          const data = await forward(method, body, timing);
+          const rejected = data?.Success === false;
+          diagnostic(rejected ? 'payment.transport_failed' : 'payment.transport_completed',
+            {...fields,...timing,durationMs:Math.round(performance.now()-started),
+             ...(rejected ? {errorCode:'BANK_REQUEST_REJECTED',retryable:false} : {})}, rejected ? 'warn' : 'info');
+          send(200, data);
+        } catch (cause) {
+          const code = cause instanceof BankTransportError ? cause.code : networkCode(cause,false);
+          diagnostic('payment.transport_failed', {...fields,...timing,errorCode:code,
+            stage:code === 'BANK_NETWORK_ERROR' ? 'unknown' : 'bank_request',
+            causeCode:isTechnicalErrorCode(cause?.cause?.code) ? cause.cause.code : undefined,
+            retryable:retryableRead(method,code,timing.upstreamStatus),
+            durationMs:Math.round(performance.now()-started)},'error');
+          response.setHeader('X-Criterion-Bank-Error', code);
+          send(502, {error:'Bank connection unavailable'});
+        }
+      });
     } catch {
       // Never log request bodies, bank signatures, customer data, or secrets.
       if (!response.headersSent) send(502, { error: 'Bank connection unavailable' });

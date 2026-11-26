@@ -29,6 +29,14 @@ TBANK_GATEWAY_SECRET=<same secret, stored as a secret>
 
 For the DEMO service, keep `TBANK_API_URL=https://securepay.tinkoff.ru/v2/` and the DEMO terminal, and use server-side reconciliation. The private Site's public URL cannot directly receive unauthenticated bank callbacks. The live service described below provides the approved notification path and authenticates to the private Site; the Site then verifies the original bank signature and payment details.
 
+## Packaging and tracing (P0)
+
+For the systemd deployment, include the repository's `lib/{diagnostics,diagnostic-schema,request-context,payment-network}.mjs` files under `lib/` in the staging directory, alongside the existing `server.mjs`, certificates and unit files. The installers lay out `services/tbank-gateway/server.mjs` and `lib/` under the service directory. For an existing installation, package these files together and use the updated unit. The original single-file package remains the rollback artifact.
+
+Trusted site calls carry a second HMAC over the original signature and both trace IDs. An old gateway still validates the original signature. A new gateway receiving a legacy call or invalid trace metadata assigns independent IDs. Trace headers end at the gateway.
+
+The site allows 15 s across all bank calls in a checkout/status request. The gateway allows 12 s per upstream call, including 3 s for establishing TLS. The notification forwarder allows 8 s. Caddy's local dial and response-header deadlines remain 3 s and 15 s. A lost Init or Cancel response requires the existing reconciliation path. A successful health endpoint only confirms the gateway process.
+
 ## Runtime and checks
 
 Node 24 LTS. Official Linux x64 runtime verified during preparation: `node-v24.22.3-linux-x64.tar.xz`, SHA256 `4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb` from `https://nodejs.org/dist/latest-v24.x/SHASUMS256.txt`.

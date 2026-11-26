@@ -8,7 +8,8 @@ Type=simple
 User=criterion-tbank-live
 Group=criterion-tbank-live
 EnvironmentFile=/etc/criterion-tbank-live/gateway.env
-ExecStart=/opt/criterion-tbank/runtime/bin/node /opt/criterion-tbank-live/server.mjs
+Environment=SERVICE_NAME=tbank-gateway
+ExecStart=/opt/criterion-tbank/runtime/bin/node /opt/criterion-tbank-live/services/tbank-gateway/server.mjs
 WorkingDirectory=/opt/criterion-tbank-live
 Restart=on-failure
 RestartSec=5
