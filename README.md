@@ -79,7 +79,7 @@ try {
 
 ## Диагностика в логах
 
-В Amvera откройте **«Лог приложения» → «Загрузить историю»**. Каждое диагностическое событие занимает одну JSON-строку. Поле `message` содержит поисковую метку `Criterion diagnostics v2:`. Для поиска по обращению пользователя используйте `requestId` из заголовка `X-Request-ID`. Формат событий, примеры поиска и ограничения описаны в [руководстве по диагностике](docs/diagnostics.md).
+В Amvera откройте **«Лог приложения» → «Загрузить историю»**. Каждое диагностическое событие занимает одну JSON-строку. Поле `message` содержит поисковую метку `Criterion diagnostics v2:`. Найдите запрос по времени обращения и действию пользователя, затем используйте `requestId` из найденного события. Формат событий, примеры поиска и ограничения описаны в [руководстве по диагностике](docs/diagnostics.md).
 
 | Событие | Что проверено |
 |---|---|
@@ -159,3 +159,7 @@ node tests/container-e2e.mjs
 История до переноса: [RELEASE_NOTES.md](RELEASE_NOTES.md). Старые отчёты в `docs/` описывают Sites и не являются инструкцией к этой ветке.
 
 Справка Amvera: [Docker](https://docs.amvera.ru/applications/configuration/docker.html), [постоянная SQLite](https://docs.amvera.ru/databases/sqlite.html), [дополнительный Git remote](https://docs.amvera.ru/applications/git/secondary-origin.html), [пробы](https://docs.amvera.ru/general/k8sprobe.html).
+
+## Поддержка и эксплуатация
+
+[Диагностика и приёмка релиза](docs/diagnostics.md) · [Ошибки и действия поддержки](docs/troubleshooting.md) · [Метрики и оповещения](docs/monitoring.md) · [Резервное копирование и восстановление](docs/backup-restore.md)

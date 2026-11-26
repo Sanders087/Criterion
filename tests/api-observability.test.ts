@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
-import { AppError, normalizeError, technicalCause } from '../lib/criterion/app-error.ts';
+import { AppError, HttpError, normalizeError, technicalCause } from '../lib/criterion/app-error.ts';
 import { apiRoute, observeOperation } from '../lib/criterion/api-observability.ts';
 import { getRequestContext } from '../lib/request-context.mjs';
 
@@ -52,6 +52,28 @@ test('HTTP replies and terminal logs correlate under concurrency without echoing
   assert.match(op.operationId, /^o_[0-9a-f-]{36}$/);
   assert.equal(op.operationId, failed[0].operationId);
   assert.doesNotMatch(logs.join('') + JSON.stringify(body), /fixture@example|private-fixture|00000000-0000|Error: ИИ/);
+});
+
+test('authentication and payment failures keep the same safe codes in the HTTP reply and terminal log', async t=>{
+  const logs: string[] = [];
+  for (const level of ['log','warn','error'] as const) t.mock.method(console,level,(line: string)=>logs.push(line));
+  const secret = 'fixture-private@example.test';
+  const failures = [
+    {route:'/api/auth', error:new HttpError(401,'Неверный email или пароль.',new Error(secret))},
+    {route:'/api/payments/status', error:new AppError({status:502, code:'GATEWAY_CONNECT_TIMEOUT', service:'payments',
+      stage:'gateway_request', publicMessage:'Не удалось проверить оплату.', cause:new Error(secret)})},
+  ];
+  for (const {route,error} of failures) {
+    const handler = apiRoute(route, async ()=>{throw error});
+    const response = await handler(new Request('https://fixture.test'+route,{method:'POST',body:secret}));
+    const body = await response.json();
+    const entries = logs.map(line=>JSON.parse(line)).filter(entry=>entry.event==='http.request_failed' && entry.requestId===body.requestId);
+    assert.equal(entries.length,1);
+    assert.equal(entries[0].httpStatus,error.status);
+    assert.equal(entries[0].errorCode,error.code);
+    assert.equal(entries[0].errorCode,body.code);
+  }
+  assert.ok(!logs.join('').includes(secret));
 });
 
 test('error normalization preserves trusted metadata, bounds cause traversal and separates validation and timeout', () => {

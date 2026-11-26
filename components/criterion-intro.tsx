@@ -8,13 +8,21 @@ export function CriterionIntro(){
  const [preview,setPreview]=useState(false);
  useEffect(()=>{
   if(location.pathname!=='/'||matchMedia('(prefers-reduced-motion: reduce)').matches)return;
-  setPreview(process.env.NODE_ENV==='development'&&new URLSearchParams(location.search).get('intro')==='preview');
-  setVisible(true);
+  const firstFrame = requestAnimationFrame(() => {
+    setPreview(process.env.NODE_ENV==='development' && new URLSearchParams(location.search).get('intro')==='preview');
+    setVisible(true);
+  });
+  return () => cancelAnimationFrame(firstFrame);
  },[]);
  useEffect(()=>{
   if(!visible)return;
   const el=canvas.current,ctx=el?.getContext('2d');
-  if(!el||!ctx){setVisible(false);return;}
+  const mask=document.createElement('canvas');mask.width=900;mask.height=180;
+  const m=mask.getContext('2d');
+  if(!el || !ctx || !m){
+    const frame = requestAnimationFrame(() => setVisible(false));
+    return () => cancelAnimationFrame(frame);
+  }
   let frame=0,disposed=false,start=0;
   const close=()=>setVisible(false);
   const key=(e:KeyboardEvent)=>{if(e.key==='Escape')close();};
@@ -28,8 +36,6 @@ export function CriterionIntro(){
   const deadline=preview?undefined:setTimeout(close,4800);
   const w=innerWidth,h=innerHeight,dpr=Math.min(devicePixelRatio||1,2);
   el.width=w*dpr;el.height=h*dpr;ctx.scale(dpr,dpr);
-  const mask=document.createElement('canvas');mask.width=900;mask.height=180;
-  const m=mask.getContext('2d');if(!m){close();return;}
   m.strokeStyle='#73baff';m.lineWidth=2.3;
   m.save();m.translate(5,25);m.scale(3,3);
   m.stroke(new Path2D('M28 10a14 14 0 1 0 0 20M11 16h20M11 24h20'));m.restore();
