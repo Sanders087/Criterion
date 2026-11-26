@@ -31,7 +31,7 @@ For the DEMO service, keep `TBANK_API_URL=https://securepay.tinkoff.ru/v2/` and 
 
 ## Packaging and tracing (P0)
 
-For the systemd deployment, include the repository's `lib/{diagnostics,diagnostic-schema,diagnostic-ai,diagnostic-mail,diagnostic-payment,request-context,payment-network}.mjs` files under `lib/` in the staging directory, alongside the existing `server.mjs`, certificates and unit files. The installers lay out `services/tbank-gateway/server.mjs` and `lib/` under the service directory. For an existing installation, package these files together and use the updated unit. The original single-file package remains the rollback artifact.
+For the systemd deployment, include the repository's `lib/{diagnostics,diagnostic-schema,diagnostic-ai,diagnostic-mail,diagnostic-payment,diagnostic-storage,diagnostic-integrations,diagnostic-metrics,request-context,payment-network}.mjs` files under `lib/` in the staging directory, alongside the existing `server.mjs`, certificates and unit files. The installers lay out `services/tbank-gateway/server.mjs` and `lib/` under the service directory. For an existing installation, package these files together and use the updated unit. The original single-file package remains the rollback artifact.
 
 Trusted site calls carry a second HMAC over the original signature and both trace IDs. An old gateway still validates the original signature. A new gateway receiving a legacy call or invalid trace metadata assigns independent IDs. Trace headers end at the gateway.
 

@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 const image = process.env.CRITERION_TEST_IMAGE || 'criterion:docker';
 const suffix = randomBytes(6).toString('hex'), name = 'criterion-check-' + suffix, volume = name + '-data';
-const env = { ...process.env, PII_ANALYZER_TOKEN: randomBytes(32).toString('hex') };
+const env = { ...process.env, PII_ANALYZER_TOKEN: randomBytes(32).toString('hex'), MONITORING_TOKEN: randomBytes(32).toString('hex') };
 function docker(args, check = true) {
   if (args[0] === 'exec') args = ['exec', '--user', '10001:10001', ...args.slice(1)];
   const result = spawnSync('docker', args, { encoding: 'utf8', env, windowsHide: true, timeout: 120000 });
@@ -16,11 +16,12 @@ function docker(args, check = true) {
 let created = false;
 try {
   docker(['volume', 'create', volume]);
-  docker(['run', '-d', '--name', name, '--network', 'none', '--read-only', '--memory', '1536m', '--cpus', '2',
+  const launch = () => docker(['run', '-d', '--name', name, '--network', 'none', '--read-only', '--memory', '1536m', '--cpus', '2',
     '--tmpfs', '/tmp:rw,nosuid,size=64m', '--mount', 'type=volume,source=' + volume + ',target=/data',
-    '--mount', 'type=bind,source=' + fileURLToPath(new URL('./', import.meta.url)) + ',target=/test,readonly',
-    '-e', 'PII_ANALYZER_TOKEN', '-e', 'AUTH_PUBLIC_URL=https://criterion.test', '-e', 'OPENAI_API_KEY=fixture-only',
-    image, 'node', 'scripts/run-with-pii.mjs', '--', 'node', '--import', 'file:///test/container-provider.mjs', 'scripts/start-site.mjs', 'server.js']);
+    '--mount', 'type=bind,source=' + fileURLToPath(new URL('./', import.meta.url)) + ',target=/app/tests,readonly',
+    '-e', 'MONITORING_TOKEN', '-e', 'PII_ANALYZER_TOKEN', '-e', 'AUTH_PUBLIC_URL=https://criterion.test', '-e', 'OPENAI_API_KEY=fixture-only',
+    image, 'node', 'scripts/run-with-pii.mjs', '--', 'node', '--import', 'file:///app/tests/container-provider.mjs', 'scripts/start-site.mjs', 'server.js']);
+  launch();
   created = true;
   async function ready() {
     for (let i = 0; i < 70; i++) {
@@ -58,19 +59,30 @@ try {
   console.log('Storage diagnostics: actual SQLite file and /data mount verified; no secrets in events.');
   assert.equal(docker(['exec', name, 'node', '-p', "require('fs').statSync('/proc/1').uid"]).stdout.trim(), '10001');
   console.log(docker(['exec', name, 'python', 'scripts/check-pii-endpoint.py', '--url', 'http://127.0.0.1:8100/analyze']).stdout.trim());
-  console.log(docker(['exec', name, 'node', '/test/container-client.mjs']).stdout.trim());
-  assert.match(docker(['exec', name, 'python', 'scripts/backup-db.py']).stdout, /backups\/criterion-/);
-  docker(['restart', '--time', '15', name]); await ready();
-  console.log(docker(['exec', name, 'node', '/test/container-client.mjs', '--persisted']).stdout.trim());
+  console.log(docker(['exec', name, 'node', '/app/tests/container-client.mjs']).stdout.trim());
+  const pythonSuite = docker(['exec',name,'python','-B','-m','unittest','discover','-s','/app/tests','-p','test_backup_restore.py']);
+  console.log(pythonSuite.stderr.trim());
+  const backup = docker(['exec', name, 'python', 'scripts/backup-db.py']).stdout.trim();
+  assert.match(backup, /^\/data\/backups\/criterion-[0-9TZ]+\.sqlite$/);
+  docker(['exec',name,'python','scripts/backup-db.py','--restore',backup,'--to','/tmp/criterion-recovered.sqlite']);
+  console.log(docker(['exec',name,'node','/app/tests/container-monitoring.mjs']).stdout.trim());
+  docker(['stop','--time','15',name]);
+  const original = docker(['logs',name]);
+  docker(['rm',name]);
+  created = false;
+  launch();
+  created = true;
+  await ready();
+  console.log(docker(['exec', name, 'node', '/app/tests/container-client.mjs', '--persisted']).stdout.trim());
   docker(['stop', '--time', '15', name]);
   assert.equal(docker(['inspect', '--format', '{{.State.ExitCode}}', name]).stdout.trim(), '0');
   const combined = docker(['logs', name]);
-  const transcript = combined.stdout + '\n' + combined.stderr;
+  const transcript = [original.stdout,original.stderr,combined.stdout,combined.stderr].join('\n');
   const synthetic = JSON.parse(readFileSync(new URL('./fixtures/pii-office-services-case.json', import.meta.url), 'utf8'));
   assert.equal(synthetic.syntheticOnly, true);
   // Four-digit passport series alone can occur in random request IDs. Check them in context.
   const markers = [
-    'docker@example.test', 'Synthetic-Docker-Password-2026', env.PII_ANALYZER_TOKEN, 'CRITERION_PII',
+    'docker@example.test', 'Synthetic-Docker-Password-2026', env.PII_ANALYZER_TOKEN, env.MONITORING_TOKEN, 'CRITERION_PII',
     synthetic.text.split('\n')[0], ...synthetic.text.match(/серия \d+, номер \d+/gu),
     ...synthetic.sensitive.map(span => span.text).filter(value => !/^\d{1,8}$/.test(value)),
   ];

@@ -4,6 +4,7 @@
 !pnpm-lock.yaml
 !pnpm-workspace.yaml
 !.npmrc
+!instrumentation.ts
 !next.config.ts
 !tsconfig.json
 !postcss.config.mjs

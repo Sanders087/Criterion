@@ -14,7 +14,7 @@
     "db:generate": "drizzle-kit generate",
     "start:container": "node scripts/run-with-pii.mjs -- node scripts/start-site.mjs",
     "test": "node --experimental-strip-types --test tests/*.test.ts tests/*.test.mjs services/tbank-gateway/server.test.mjs",
-    "test:integration": "node tests/integration.mjs && node tests/auth-integration.mjs && node tests/email-integration.mjs && node tests/payments-integration.mjs && node tests/api-observability.mjs && node tests/ai-save-integration.mjs"
+    "test:integration": "node tests/integration.mjs && node tests/auth-integration.mjs && node tests/email-integration.mjs && node tests/payments-integration.mjs && node tests/api-observability.mjs && node tests/ai-save-integration.mjs && node tests/metrics-integration.mjs && node tests/reconciliation-integration.mjs && node tests/health-integration.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

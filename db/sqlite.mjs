@@ -75,8 +75,13 @@ export function openDatabase(path, { migrate = true, busyTimeoutMs = 5000, migra
           rolledBack = true;
         } catch { rollbackFailed = true; }
       }
-      fail(frame.failedOperation || operation || 'database.transaction',cause,started,{
-        transaction:true,rolledBack,rollbackFailed,parentOperation:frame.failedOperation ? operation : undefined});
+      if (!began && activeTransaction) {
+        // A nested BEGIN was rejected by SQLite. Its outer transaction records the rollback once.
+        activeTransaction.failedOperation = operation || 'database.transaction';
+      } else {
+        fail(frame.failedOperation || operation || 'database.transaction',cause,started,{
+          transaction:true,rolledBack,rollbackFailed,parentOperation:frame.failedOperation ? operation : undefined});
+      }
       throw cause;
     } finally { if (began) activeTransaction = null; }
   }

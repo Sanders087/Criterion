@@ -1,5 +1,6 @@
-import { accessSync, constants, readdirSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { readdirSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { storageWritable } from '../storage-monitor.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { integrationObservation } from '../diagnostic-integrations.mjs';
 import { detectorEndpoint, type PrivacyEnv } from '../criterion/privacy-detector';
@@ -16,12 +17,7 @@ function sqliteHealth() {
     db = new DatabaseSync(filename, { readOnly: true });
     status.reachable = true;
     // SQLite writes to the main file and may need to create or update its sidecars.
-    accessSync(dirname(resolve(filename)), constants.W_OK | constants.X_OK);
-    accessSync(filename, constants.W_OK);
-    for (const suffix of ['-wal', '-shm']) {
-      try { accessSync(filename + suffix, constants.R_OK | constants.W_OK); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    }
+    if (storageWritable(filename) !== true) return status;
     const actual = db.prepare('SELECT name FROM _criterion_migrations ORDER BY name').all();
     const expected = readdirSync(process.env.MIGRATIONS_DIR || resolve('drizzle')).filter(name => /^\d+_[\w-]+\.sql$/.test(name)).sort();
     status.functional = expected.length > 0 && actual.length === expected.length &&
