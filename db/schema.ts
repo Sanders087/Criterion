@@ -17,7 +17,13 @@ export const paymentOrders = sqliteTable('payment_orders', {
   statusRank: integer('status_rank').notNull().default(0), createdAt: integer('created_at').notNull(), updatedAt: integer('updated_at').notNull(),
   checkedAt: integer('checked_at').notNull().default(0),
   firstMissingAt: integer('first_missing_at').notNull().default(0), cancelRequestedAt: integer('cancel_requested_at').notNull().default(0),
-}, t => [uniqueIndex('payment_orders_active_document').on(t.activeDocument), uniqueIndex('payment_orders_payment_id').on(t.paymentId), index('payment_orders_document').on(t.documentId)]);
+  reconcileAttempts: integer('reconcile_attempts').notNull().default(0), reconcileNextAt: integer('reconcile_next_at').notNull().default(0),
+  reconcileLeaseUntil: integer('reconcile_lease_until').notNull().default(0), notificationFailedAt: integer('notification_failed_at').notNull().default(0),
+}, t => [uniqueIndex('payment_orders_active_document').on(t.activeDocument), uniqueIndex('payment_orders_payment_id').on(t.paymentId), index('payment_orders_document').on(t.documentId),
+  index('payment_orders_reconcile_due').on(t.reconcileNextAt,t.updatedAt)]);
+export const paymentReconciliationClock = sqliteTable('payment_reconciliation_clock', {
+  id: integer('id').primaryKey(), token: text('token').notNull(), availableAt: integer('available_at').notNull(),
+});
 export const paymentEvents = sqliteTable('payment_events', {
   id: text('id').primaryKey(), orderId: text('order_id').notNull(), status: text('status').notNull(), amount: integer('amount').notNull(), createdAt: integer('created_at').notNull(),
 }, t => [uniqueIndex('payment_events_once').on(t.orderId,t.status,t.amount)]);
