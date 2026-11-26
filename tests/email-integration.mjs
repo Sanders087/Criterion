@@ -1,11 +1,16 @@
 import {createTestApp,createFetchMock} from './node-app.mjs';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-const fetchMock=createFetchMock();fetchMock.disableNetConnect();const sent=[];let failMail=false;
-fetchMock.get('https://api.resend.com').intercept({path:'/emails',method:'POST'}).reply(200,async options=>{if(failMail)return '{}';sent.push(await new Response(options.body).json());return JSON.stringify({id:'mock-message-id'})}).persist();
+const mock=createFetchMock();mock.disableNetConnect();const sent=[], keys=[];let failMail=false,unknownMail=false;
+const fetchMock={dispatch(request){
+ if(failMail && request.url==='https://api.resend.com/emails')return {status:422,body:'private-fixture-reason',headers:{'content-type':'text/plain'}};
+ return mock.dispatch(request);
+}};
+const providerId='1a186f75-b9e8-41ba-9a81-d6d7e4f68ba2';
+mock.get('https://api.resend.com').intercept({path:'/emails',method:'POST'}).reply(200,async options=>{sent.push(await new Response(options.body).json());keys.push(options.headers['idempotency-key']);if(unknownMail)throw new Error('private-fixture-provider-timeout');return JSON.stringify({id:providerId})}).persist();
 const mf=await createTestApp({bindings:{RESEND_API_KEY:'test-key-not-real',EMAIL_FROM:'Criterion <test@example.com>',AUTH_PUBLIC_URL:'https://criterion.test'},fetchMock});
 let checks=0;
-async function req(path,body,cookie='',status=200,headers={}){const r=await mf.dispatchFetch('https://criterion.test'+path,{method:body?'POST':'GET',headers:{Origin:'https://criterion.test',...(body?{'content-type':'application/json'}:{}),...(cookie?{cookie}:{}),...headers},body:body?JSON.stringify(body):undefined});const data=await r.json();assert.equal(r.status,status,JSON.stringify(data));checks++;return {data,cookie:r.headers.get('set-cookie')?.split(';')[0]};}
+async function req(path,body,cookie='',status=200,headers={}){const r=await mf.dispatchFetch('https://criterion.test'+path,{method:body?'POST':'GET',headers:{Origin:'https://criterion.test',...(body?{'content-type':'application/json'}:{}),...(cookie?{cookie}:{}),...headers},body:body?JSON.stringify(body):undefined});const data=await r.json();assert.equal(r.status,status,JSON.stringify(data));checks++;return {data,retryAfter:r.headers.get('Retry-After'),cookie:r.headers.get('set-cookie')?.split(';')[0]};}
 const tokenFrom=mail=>new URLSearchParams(new URL(mail.text.match(/https:\/\/criterion.test\/auth#[^\s]+/)[0]).hash.slice(1)).get('token');
 const digest=t=>createHash('sha256').update(t).digest('hex');
 try{
@@ -15,6 +20,7 @@ try{
  await req(endpoint,{action:'request-reset',email},'',403,{Origin:'https://evil.test'});
  const reg=await req('/api/auth',{action:'register',email,password});assert.equal(reg.data.verificationSent,true);assert.equal(sent.length,1);assert.deepEqual(sent[0].to,[email]);assert.ok(!sent[0].text.includes(password));const verifyToken=tokenFrom(sent[0]);assert.equal(verifyToken.length,64);
  const tokenRow=await db.prepare('SELECT * FROM email_tokens').first();assert.equal(tokenRow.token_hash,digest(verifyToken));assert.notEqual(tokenRow.token_hash,verifyToken);
+ const attempt=db.prepare('SELECT * FROM mail_attempts').first();assert.equal(attempt.status,'PROVIDER_ACCEPTED');assert.equal(attempt.provider_message_id,providerId);assert.equal(keys[0],'criterion-'+attempt.operation_id);assert.ok(!JSON.stringify(attempt).includes(email));checks++;
  const unverified=await req(endpoint,{action:'request-reset',email});assert.equal(sent.length,1);
  const unknown=await req(endpoint,{action:'request-reset',email:'unknown@example.com'});assert.deepEqual(unknown.data,unverified.data);
  await req(endpoint,{action:'verify',token:verifyToken},'',401);
@@ -36,7 +42,37 @@ try{
  const beforeFailure=(await db.prepare('SELECT count(*) AS n FROM email_tokens WHERE claim IS NULL AND expires_at>?').bind(Date.now()).first()).n;
  await req(endpoint,{action:'request-reset',email});const afterFailure=(await db.prepare('SELECT count(*) AS n FROM email_tokens WHERE claim IS NULL AND expires_at>?').bind(Date.now()).first()).n;assert.equal(afterFailure,beforeFailure);
  await req(endpoint,{action:'send-verification'},other.cookie,503);
- await req(endpoint,{action:'request-reset',email},'',429);
+ const throttled=await req(endpoint,{action:'request-reset',email},'',429);assert.ok(Number(throttled.retryAfter)>0 && Number(throttled.retryAfter)<=3600);
+ assert.equal(db.prepare("SELECT count(*) n FROM mail_attempts WHERE status='PROVIDER_REJECTED' AND error_code='MAIL_PROVIDER_REJECTED'").first().n,2);checks++;
+ await db.prepare('DELETE FROM auth_limits').run();failMail=false;unknownMail=true;
+ const lost=await req(endpoint,{action:'request-reset',email});
+ assert.deepEqual(lost.data,unknown.data);
+ const uncertain=db.prepare("SELECT * FROM mail_attempts WHERE status='OUTCOME_UNKNOWN'").first();
+ assert.equal(uncertain.error_code,'MAIL_OUTCOME_UNKNOWN');assert.equal(uncertain.provider_message_id,null);
+ assert.ok(!mf.logs().includes('private-fixture-provider-timeout'));checks++;
+ await req(endpoint,{action:'reset',token:tokenFrom(sent.at(-1)),password:'Retained-Link-2026'});
+ await req(endpoint,{action:'reset',token:tokenFrom(sent.at(-1)),password:'Retained-Link-2026'},'',400);
+ await db.prepare('DELETE FROM auth_limits').run();unknownMail=false;
+ // A confirmed upstream acceptance survives failure to update the local audit row.
+ db.prepare("CREATE TRIGGER reject_mail_audit BEFORE UPDATE ON mail_attempts WHEN NEW.status='PROVIDER_ACCEPTED' BEGIN SELECT RAISE(ABORT,'private-fixture-audit-error'); END").run();
+ const acceptedWithBadAudit=await req(endpoint,{action:'send-verification'},other.cookie);
+ assert.equal(acceptedWithBadAudit.data.ok,true);
+ const audit=db.prepare('SELECT * FROM mail_attempts WHERE operation_id=?').bind(keys.at(-1).slice('criterion-'.length)).first();
+ assert.equal(audit.status,'OUTCOME_UNKNOWN');assert.equal(audit.provider_message_id,null);
+ const events=mf.logs().split('\n').filter(line=>line.startsWith('{')).map(line=>JSON.parse(line))
+   .filter(row=>row.operationId===audit.operation_id);
+ assert.ok(events.some(row=>row.event==='mail.provider_accepted'&&row.providerMessageId===providerId));
+ assert.ok(events.some(row=>row.event==='mail.status_save_failed'&&row.errorCode==='DATABASE_ERROR'));
+ assert.ok(!mf.logs().includes('private-fixture-audit-error'));checks++;
+ db.prepare('DROP TRIGGER reject_mail_audit').run();
+ await db.prepare('DELETE FROM auth_limits').run();
+ // Sending verification uses the authenticated recipient, even when an irrelevant email is present.
+ for(let i=0;i<3;i++)await req(endpoint,{action:'send-verification',email:'fixture'+i+'@example.test'},other.cookie);
+ await req(endpoint,{action:'send-verification',email:'fixture3@example.test'},other.cookie,429);
+ // Missing trusted address retains a shared emergency ceiling and individual recipient limits.
+ await db.prepare('DELETE FROM auth_limits').run();
+ for(let i=0;i<22;i++)await req(endpoint,{action:'request-reset',email:'missing'+i+'@example.test'});
+
  // Invalid reset attempts still consume limits. Different links must not share
  // one global bucket, while one link cannot evade its limit by changing IPs.
  await db.prepare('DELETE FROM auth_limits').run();
@@ -49,5 +85,12 @@ try{
  // Independent token buckets do not relax the existing per-IP ceiling.
  for(let i=0;i<40;i++)await req(endpoint,{action:'reset',token:digest('one-ip-reset-'+i)},'',400,{'cf-connecting-ip':'203.0.113.1'});
  await req(endpoint,{action:'reset',token:digest('one-ip-reset-over-limit')},'',429,{'cf-connecting-ip':'203.0.113.1'});
+ const unconfigured=await createTestApp();
+ try {
+  for(const action of ['request-reset','send-verification']){
+   const r=await unconfigured.dispatchFetch('https://criterion.test'+endpoint,{method:'POST',headers:{Origin:'https://criterion.test','Content-Type':'application/json'},body:JSON.stringify({action,email})});
+   const body=await r.json();assert.equal(r.status,503);assert.equal(body.code,'MAIL_CONFIG_INVALID');assert.ok(body.requestId);checks++;
+  }
+ }finally{await unconfigured.dispose()}
  console.log(`Email checks passed: ${checks}; mocked provider only. Confirmation, no account enumeration in reset responses, token hashing, expiry, single use/races, session revocation, failed send cleanup, isolated token limits and per-IP limits.`);
 }finally{await mf.dispose()}

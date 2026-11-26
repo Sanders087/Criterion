@@ -17,22 +17,23 @@ export function authMessage(purpose:'verify'|'reset',origin:string,token:string,
  const ifIgnored=purpose==='verify'?'Если вы не регистрировались в Criterion, просто проигнорируйте это письмо.':'Если вы не запрашивали сброс, просто проигнорируйте письмо — ваш пароль останется прежним.';
  return {subject:title,text:`${context}\n\n${instruction}\n\n${link.href}\n\nСсылка действует ${ttl} и используется один раз. ${ifIgnored} Никому не пересылайте ссылку.\n\nCriterion`};
 }
-function deliveryError(stage: 'configuration' | 'provider_request' | 'provider_response', cause?: unknown, upstreamStatus?: number) {
- return new AppError({status:503, code:'MAIL_SEND_FAILED', publicMessage:'Не удалось отправить письмо. Повторите позже.',
+type DeliveryCode = 'MAIL_CONFIG_INVALID' | 'MAIL_PROVIDER_REJECTED' | 'MAIL_OUTCOME_UNKNOWN';
+function deliveryError(code: DeliveryCode, stage: 'configuration' | 'provider_request' | 'provider_response', cause?: unknown, upstreamStatus?: number) {
+ return new AppError({status:503, code, publicMessage:'Не удалось подтвердить отправку письма. Попробуйте позже.',
   service:'mail', stage, cause, upstreamStatus, retryable:false});
 }
 export async function sendAuthMail(config:MailConfig,to:string,purpose:'verify'|'reset',token:string,idempotencyKey:string,transport:typeof fetch=fetch){
- if(!mailReady(config))throw deliveryError('configuration');
+ if(!mailReady(config))throw deliveryError('MAIL_CONFIG_INVALID','configuration');
  const message=authMessage(purpose,config.AUTH_PUBLIC_URL!,token,to),replyTo=config.EMAIL_REPLY_TO?.trim();
  let response: Response;
  try { response=await transport('https://api.resend.com/emails',{method:'POST',headers:{Authorization:`Bearer ${config.RESEND_API_KEY}`,'Content-Type':'application/json','Idempotency-Key':idempotencyKey},body:JSON.stringify({from:config.EMAIL_FROM,to:[to],...(replyTo?{reply_to:replyTo}:{}),...message}),signal:AbortSignal.timeout(12000)});
- } catch(cause) { throw deliveryError('provider_request',cause); }
+ } catch(cause) { throw deliveryError('MAIL_OUTCOME_UNKNOWN','provider_request',cause); }
  if(!response.ok){
   await response.body?.cancel().catch(() => {});
-  throw deliveryError('provider_response',undefined,response.status);
+  throw deliveryError(response.status >= 400 && response.status < 500 && ![408,409].includes(response.status) ? 'MAIL_PROVIDER_REJECTED' : 'MAIL_OUTCOME_UNKNOWN','provider_response',undefined,response.status);
  }
  let result: {id?:string};
- try { result=await response.json(); } catch(cause) { throw deliveryError('provider_response',cause,response.status); }
- if(typeof result?.id !== 'string' || !result.id)throw deliveryError('provider_response',undefined,response.status);
+ try { result=await response.json(); } catch(cause) { throw deliveryError('MAIL_OUTCOME_UNKNOWN','provider_response',cause,response.status); }
+ if(typeof result?.id !== 'string' || result.id.length !== 36 || !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(result.id))throw deliveryError('MAIL_OUTCOME_UNKNOWN','provider_response',undefined,response.status);
  return result.id;
 }

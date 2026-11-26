@@ -16,6 +16,10 @@ test('Forwarded client addresses are ignored unless an administrator explicitly 
   delete process.env.TRUSTED_CLIENT_IP_HEADER;
   const request = (value: string) => new Request('http://localhost', { headers: { 'x-real-ip': value, 'cf-connecting-ip': '192.0.2.2' } });
   assert.equal(clientAddress(request('192.0.2.1')), 'unknown');
+  process.env.TRUSTED_CLIENT_IP_HEADER = 'X-Forwarded-For';
+  assert.equal(clientAddress(new Request('http://localhost',{headers:{'X-Forwarded-For':'192.0.2.1'}})), 'unknown');
+  process.env.TRUSTED_CLIENT_IP_HEADER = 'cookie';
+  assert.equal(clientAddress(new Request('http://localhost',{headers:{cookie:'192.0.2.1'}})), 'unknown');
   process.env.TRUSTED_CLIENT_IP_HEADER = 'x-real-ip';
   assert.equal(clientAddress(request('192.0.2.1')), '192.0.2.1');
   assert.equal(clientAddress(request('2001:db8::1')), '2001:db8::1');

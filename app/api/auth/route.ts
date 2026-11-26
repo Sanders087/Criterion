@@ -1,7 +1,8 @@
+import {checkLimit} from '../../../lib/criterion/rate-limit';
 import {reportSuppressed} from '../../../lib/criterion/api-observability';
 import {env} from '../../../lib/runtime';
 import {mailReady} from '../../../lib/criterion/mail';
-import {mailConfig,issueEmail} from '../../../lib/criterion/email-tokens';
+import {mailConfig,issueEmail,mailRequest,skipMail} from '../../../lib/criterion/email-tokens';
 import {z} from 'zod';
 import {sameOrigin,clientAddress} from '../../../lib/criterion/request-security';
 import {getChatGPTUser} from '../../chatgpt-auth';
@@ -18,7 +19,8 @@ export const POST = apiRoute('/api/auth', async (request:Request) => {
  const email=data.email?.toLowerCase();if(!email||!data.password)throw new HttpError(400,'Введите email и пароль.');
  // Atomic fixed-window limits, per IP and email. No secrets are stored in limit keys.
  const ip=clientAddress(request);
- for(const [scope,limit] of [['ip:'+ip,40],['email:'+email,10]] as const){const key=await digest(scope);const row=await env.DB!.prepare('INSERT INTO auth_limits (key,count,expires_at) VALUES (?,1,?) ON CONFLICT(key) DO UPDATE SET count=CASE WHEN expires_at<=? THEN 1 ELSE count+1 END, expires_at=CASE WHEN expires_at<=? THEN excluded.expires_at ELSE expires_at END RETURNING count').bind(key,now+15*60*1000,now,now).first<{count:number}>();if((row?.count||0)>limit)throw new HttpError(429,'Слишком много попыток. Повторите через 15 минут.');}
+ await checkLimit('ip:'+ip,'auth_address',40,900000,now,ip!=='unknown');
+ await checkLimit('email:'+email,'auth_recipient',10,900000,now,ip!=='unknown');
  let account=await env.DB!.prepare('SELECT * FROM accounts WHERE email=?').bind(email).first<{id:string,email:string,password_hash:string,salt:string,recovery_hash:string}>();
  let recoveryCode:string|undefined;
  if(data.action==='register'){
@@ -43,7 +45,10 @@ export const POST = apiRoute('/api/auth', async (request:Request) => {
  const token=randomToken();await env.DB!.prepare('INSERT INTO sessions (token_hash,account_id,expires_at) VALUES (?,?,?)').bind(await digest(token),account!.id,now+14*86400000).run();
  await env.DB!.batch([env.DB!.prepare('DELETE FROM sessions WHERE expires_at<=?').bind(now),env.DB!.prepare('DELETE FROM auth_limits WHERE expires_at<=?').bind(now)]);
  let verificationSent=false;
- if(data.action==='register'&&mailReady(mailConfig())){try{await issueEmail(account!.id,'verify');verificationSent=true}catch(cause){reportSuppressed(cause)}}
+ if(data.action==='register') await mailRequest('verify',async () => {
+  if(!mailReady(mailConfig())){skipMail('verify',true);return;}
+  try{await issueEmail(account!.id,'verify');verificationSent=true}catch(cause){reportSuppressed(cause)}
+ });
  return Response.json({ok:true,verificationSent,...(recoveryCode?{recoveryCode}:{})},{headers:{'Set-Cookie':sessionCookie(token),'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
 });
 
