@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {ApiError,responseError,signInPath,workspaceReturnPath,asClientError,supportData,requestJson} from '../lib/criterion/client-session.ts';
+import {ApiError,responseError,signInPath,workspaceReturnPath,asClientError,logClientError,requestJson} from '../lib/criterion/client-session.ts';
 
 const id='7d89c994-18b7-419c-b341-668662fe28b8';
 test('sign-in preserves the document and bank return without carrying unrelated data',()=>{
@@ -25,25 +25,63 @@ test('expired sessions are recognized even when the response is not JSON',async(
   const unavailable=await responseError(new Response('proxy error',{status:502}));
   assert.equal(unavailable.status,502);assert.match(unavailable.message,/Попробуйте/);
 });
-test('support report uses allowlisted code, authoritative request ID, operation and UTC time only', async()=>{
-  const header='r_550e8400-e29b-41d4-a716-446655440000',body='r_fddaf0c6-c5aa-4c71-a2f1-84428dbc231a';
-  const markers=['mistake+private@example.test','UPPERCASE_SYNTHETIC_SECRET','https://example.test/private#token'];
-  const error=await responseError(Response.json({error:markers.join(' '),code:markers[1],requestId:body},{
-    status:502,headers:{'X-Request-ID':header}
+test('diagnostic-only responses show a plain message and keep recognized metadata', async()=>{
+  const requestId = 'r_550e8400-e29b-41d4-a716-446655440000';
+  const fallback = 'Сервер не смог выполнить запрос. Попробуйте позже.';
+  const cases = [
+    {error:'DB_BUSY', code:undefined, expectedCode:'DB_BUSY'},
+    {error:' UNAUTHORIZED ', code:'UNAUTHORIZED', expectedCode:'UNAUTHORIZED'},
+    {error:'new-opaque-code', code:'new-opaque-code', expectedCode:'HTTP_ERROR'},
+    {error:'UNKNOWN_GATEWAY_CODE', code:undefined, expectedCode:'HTTP_ERROR'},
+    {error:requestId, code:undefined, expectedCode:'HTTP_ERROR'},
+  ];
+  for (const {error,code,expectedCode} of cases) {
+    const result = await responseError(Response.json({error,code},{status:503}),'login');
+    assert.equal(result.message,fallback);
+    assert.equal(result.code,expectedCode);
+    assert.equal(result.requestId,error===requestId ? requestId : undefined);
+  }
+  const payment = await responseError(Response.json({error:'GATEWAY_CONNECT_TIMEOUT',requestId},{status:502}),'payment_status');
+  assert.equal(payment.message,'Не удалось проверить оплату. Попробуйте чуть позже.');
+  assert.equal(payment.code,'GATEWAY_CONNECT_TIMEOUT');
+  assert.equal(payment.requestId,requestId);
+});
+
+test('client logs record each displayed browser error once using only safe metadata', async t=>{
+  const lines: string[] = [];
+  t.mock.method(console, 'warn', (line: string)=>lines.push(line));
+  const header = 'r_550e8400-e29b-41d4-a716-446655440000';
+  const body = 'r_fddaf0c6-c5aa-4c71-a2f1-84428dbc231a';
+  const privateText = 'fixture-private@example.test https://fixture.test/?secret=fixture';
+
+  const serverError = await responseError(Response.json({error:'Сервис временно недоступен.',code:'DB_BUSY',requestId:body},{
+    status:503,headers:{'X-Request-ID':header}
   }),'checkout');
-  assert.equal(error.code,'HTTP_ERROR');
-  assert.equal(error.requestId,header);
-  const report=supportData(error);
-  assert.deepEqual(report.split('\n'),['Код ошибки: HTTP_ERROR','Идентификатор запроса: '+header,'Время: '+error.occurredAt,'Операция: Создание платежа']);
-  assert.match(error.occurredAt,/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
-  for(const marker of [...markers,body]) assert.ok(!report.includes(marker));
+  assert.equal(serverError.requestId,header);
+  logClientError(serverError);
+  logClientError(null);
+  logClientError(new ApiError(0,'Сохраните правки.','UNSAVED_CHANGES','save'));
+  assert.equal(lines.length,0);
+
+  const invalidResponse = new ApiError(200,privateText,'CLIENT_RESPONSE_INVALID','checkout',header);
+  logClientError(invalidResponse);
+  logClientError(invalidResponse);
+  const renderFailure = asClientError(new Error(privateText), 'ui');
+  logClientError(renderFailure);
+  logClientError(new ApiError(0,privateText,'CLIENT_OFFLINE','open',privateText));
+  logClientError(new ApiError(0,privateText,'CLIENT_NETWORK_ERROR','open'));
+  assert.deepEqual(lines.map(line=>JSON.parse(line)),[
+    {event:'client.error', errorCode:'CLIENT_RESPONSE_INVALID', operation:'checkout', requestId:header},
+    {event:'client.error', errorCode:'UI_EXCEPTION', operation:'ui'},
+    {event:'client.error', errorCode:'CLIENT_OFFLINE', operation:'open'},
+    {event:'client.error', errorCode:'CLIENT_NETWORK_ERROR', operation:'open'},
+  ]);
+  assert.ok(!renderFailure.message.includes(privateText));
   const fallback=await responseError(Response.json({code:'RATE_LIMITED',requestId:body},{status:429,headers:{'X-Request-ID':'invalid'}}),'request_reset');
   assert.equal(fallback.requestId,body);
   assert.equal(fallback.code,'RATE_LIMITED');
-  const renderError=asClientError(new Error(markers.join(' ')),'ui');
-  assert.equal(renderError.code,'UI_EXCEPTION');
-  assert.ok(!supportData(renderError).includes('Идентификатор'));
-  assert.ok(!renderError.message.includes(markers[0]));
+  const unknown=await responseError(Response.json({code:privateText},{status:500}),'open');
+  assert.equal(unknown.code,'HTTP_ERROR');
 });
 
 test('request distinguishes offline, transport, rejected HTTP and malformed successful responses', async()=>{
@@ -57,7 +95,7 @@ test('request distinguishes offline, transport, rejected HTTP and malformed succ
       globalThis.fetch=async()=>{throw new TypeError('fixture-sensitive-network-message')};
       await assert.rejects(requestJson(path,{},'open'),(error:unknown)=>error instanceof ApiError&&
         error.code===(connected?'CLIENT_NETWORK_ERROR':'CLIENT_OFFLINE')&&error.requestId===undefined&&
-        !supportData(error).includes(path)&&!error.message.includes('fixture-sensitive'));
+        !error.message.includes(path)&&!error.message.includes('fixture-sensitive'));
     }
     globalThis.fetch=async()=>new Response('<html>proxy</html>',{status:502,headers:{'X-Request-ID':header}});
     await assert.rejects(requestJson(path,{},'open'),(error:unknown)=>error instanceof ApiError&&error.code==='HTTP_ERROR'&&error.requestId===header);

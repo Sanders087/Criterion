@@ -33,64 +33,34 @@ try {
     return route.abort();
   };
   await context.route('**/*',localOnly);
-  // Capture the actual Clipboard API write without touching the user's OS clipboard.
-  function installClipboard(target) {
-    return target.addInitScript(()=>{
-      window.__fixtureClipboard = {value:null,denied:false};
-      Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async value=>{
-        if (window.__fixtureClipboard.denied) throw new DOMException('Denied','NotAllowedError');
-        window.__fixtureClipboard.value=value;
-      }}});
-    });
-  }
-  await installClipboard(context);
   const page = await context.newPage();
+  const authAlert=page.locator('.auth-error[role="alert"]');
+  const workspaceAlert=page.locator('.error-box[role="alert"]');
   const safeId = /^r_[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/;
-  async function serverId(response) {
+  async function checkServerError(response,code) {
     const id=await response.headerValue('x-request-id');
     assert.match(id,safeId);
-    return id;
+    const body=await response.json();
+    assert.equal(body.code,code);
+    assert.equal(body.requestId,id);
+    // The child process emits this terminal event before returning the HTTP response.
+    const line=app.logs().split('\n').find(entry=>entry.startsWith('{')&&
+      entry.includes('"event":"http.request_failed"')&&entry.includes('"requestId":"'+id+'"'));
+    assert.ok(line,'expected a server failure event for '+id);
+    const event=JSON.parse(line);
+    assert.equal(event.errorCode,code);
+    assert.equal(event.httpStatus,response.status());
   }
-  async function support(code,id,operation,{manual=false,target=page,scope=target,message}={}) {
-    const panel=scope.getByRole('alert').filter({hasText:'Скопировать для поддержки'});
-    const copy=panel.getByRole('button',{name:'Скопировать для поддержки',exact:true});
-    await copy.waitFor();
-    const displayed=(await panel.innerText()).trim();
-    assert.doesNotMatch(displayed,/Код ошибки|Идентификатор запроса|Операция:|Время:|r_[a-f\d-]{36}|\d{4}-\d\d-\d\dT\d\d:\d\d/iu);
-    for (const technical of [code,operation,secret,bodyId]) assert.ok(!displayed.includes(technical));
-    assert.equal(await panel.getByRole('textbox').count(),0);
-    const publicText=displayed.replace('Скопировать для поддержки','').trim();
-    assert.ok(publicText,'the alert should explain what happened');
-    if (message) assert.equal(publicText,message);
-    await target.evaluate(deny=>{window.__fixtureClipboard.value=null;window.__fixtureClipboard.denied=deny;},manual);
-    await copy.click();
-    let content;
-    if (manual) {
-      const fallback=panel.getByRole('textbox',{name:'Данные ошибки для поддержки'});
-      await fallback.waitFor();
-      content=await fallback.inputValue();
-      assert.equal(await fallback.getAttribute('readonly'),'');
-      assert.ok(await fallback.evaluate(node=>node.selectionStart===0&&node.selectionEnd===node.value.length));
-    } else {
-      await target.waitForFunction(()=>typeof window.__fixtureClipboard.value === 'string');
-      content=await target.evaluate(()=>window.__fixtureClipboard.value);
-      assert.equal(await panel.getByRole('textbox').count(),0);
-    }
-    const lines=content.split('\n');
-    assert.equal(lines.shift(),'Код ошибки: '+code);
-    if (id) {
-      assert.match(id,safeId);assert.ok(!displayed.includes(id));
-      assert.equal(lines.shift(),'Идентификатор запроса: '+id);
-    } else {
-      assert.doesNotMatch(content,/r_[a-f\d-]{36}/);
-    }
-    const stamp=lines.shift();assert.match(stamp,/^Время: \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
-    assert.ok(Math.abs(Date.parse(stamp.slice('Время: '.length))-Date.now())<120000);
-    assert.equal(lines.shift(),'Операция: '+operation);assert.deepEqual(lines,[]);
-    for (const sensitive of [email,password,secret,fragmentToken,bodyId,'http://','/api/'])
-      assert.ok(!content.includes(sensitive),'support clipboard must contain allowlisted fields only');
-    return content;
+  async function plainError(panel,message,{dismissible=false,scope=page}={}) {
+    await panel.filter({hasText:message}).waitFor();
+    assert.equal((await panel.innerText()).trim(),message);
+    assert.equal(await panel.getByRole('button').count(),dismissible?1:0);
+    if(dismissible) assert.ok(await panel.getByRole('button',{name:'Закрыть ошибку',exact:true}).isVisible());
+    assert.equal(await panel.locator('textarea, details, code').count(),0);
+    assert.equal(await scope.getByRole('button',{name:/скопировать.*(?:ошиб|поддержк)/iu}).count(),0);
+    assert.equal(await scope.getByRole('textbox',{name:/данные ошибки для поддержки/iu}).count(),0);
   }
+  const networkError='Не удалось получить ответ сервера. Проверьте соединение.';
 
   let authFailure = '503';
   const login = page.getByRole('button',{name:'Войти',exact:true});
@@ -107,21 +77,28 @@ try {
   await page.getByLabel('Email',{exact:true}).fill(email);
   await page.getByPlaceholder('Ваш пароль').fill(password);
   await login.click();
-  const loginLabel='Вход в аккаунт';
-  await support('DB_BUSY',headerId,loginLabel);
+  await plainError(authAlert,'Сервис временно недоступен.');
+  const browserDiagnostic=page.waitForEvent('console',{
+    predicate:entry=>entry.type()==='warning'&&entry.text().includes('"errorCode":"CLIENT_RESPONSE_INVALID"'),
+  });
   authFailure='bad-json';await login.click();
-  await support('CLIENT_RESPONSE_INVALID',null,loginLabel);
+  assert.deepEqual(JSON.parse((await browserDiagnostic).text()),{
+    event:'client.error',errorCode:'CLIENT_RESPONSE_INVALID',operation:'login',
+  });
+  await plainError(authAlert,'Не удалось обработать ответ сервера. Обновите страницу и проверьте результат.');
   authFailure='abort';await login.click();
-  await support('CLIENT_NETWORK_ERROR',null,loginLabel,{manual:true});
+  await plainError(authAlert,networkError);
   await context.setOffline(true);
   try {
     assert.equal(await page.evaluate(()=>navigator.onLine),false);
-    authFailure='offline';await login.click();await support('CLIENT_OFFLINE',null,loginLabel);
+    authFailure='offline';await login.click();
+    await plainError(authAlert,'Нет подключения к сети. Проверьте интернет-соединение.');
   } finally { await context.setOffline(false); }
   authFailure=null;
   const denied=page.waitForResponse(r=>r.url()===app.origin+'/api/auth'&&r.request().method()==='POST');
   await login.click();const deniedResponse=await denied;assert.equal(deniedResponse.status(),401);
-  await support('UNAUTHORIZED',await serverId(deniedResponse),loginLabel);
+  await checkServerError(deniedResponse,'UNAUTHORIZED');
+  await plainError(authAlert,'Неверный email или пароль.');
 
   await page.getByRole('tab',{name:'Регистрация',exact:true}).click();
   await page.getByLabel('Email',{exact:true}).fill(email);
@@ -149,13 +126,23 @@ try {
     return doc;
   }
   const doc=await lockedDraft(), docPath='/?document='+doc.id;
+  const openFailure='Не удалось открыть договор. Попробуйте ещё раз.';
+  await page.route(app.origin+'/api/documents/'+doc.id,route=>route.fulfill({status:503,
+    headers:{'Content-Type':'application/json','X-Request-ID':headerId},
+    body:JSON.stringify({error:openFailure,code:'DB_BUSY',requestId:bodyId,internal:secret}),
+  }),{times:1});
   await page.goto(app.origin+docPath);
+  await plainError(workspaceAlert,openFailure,{dismissible:true});
+  // Retry from the ordinary document list; the one-off failure is gone.
+  await page.getByRole('button',{name:new RegExp(secret)}).click();
+  await workspaceAlert.waitFor({state:'hidden'});
   const pay=page.getByRole('button',{name:/199\s*₽/});
   const checkoutReply=page.waitForResponse(r=>r.url()===app.origin+'/api/payments/checkout'&&r.request().method()==='POST');
   await pay.click();
   const checkoutHttp=await checkoutReply;assert.equal(checkoutHttp.status(),502);
   const checkout=app.database().prepare('SELECT status FROM payment_orders WHERE document_id=?').bind(doc.id);
-  await support('PAYMENT_CHECK_REQUIRED',await serverId(checkoutHttp),'Создание платежа');
+  await checkServerError(checkoutHttp,'PAYMENT_CHECK_REQUIRED');
+  await plainError(workspaceAlert,'Проверьте состояние платежа перед следующей попыткой.',{dismissible:true});
   assert.equal(checkout.first().status,'INIT_OUTCOME_UNKNOWN');
   assert.deepEqual(bankMethods,['Init']);assert.equal(await pay.count(),0);
   await page.reload();
@@ -166,8 +153,9 @@ try {
     body:JSON.stringify({code:'GATEWAY_CONNECT_TIMEOUT',requestId:bodyId,error:'GATEWAY_CONNECT_TIMEOUT',internal:secret})
   }),{times:1});
   await check.click();
-  await support('GATEWAY_CONNECT_TIMEOUT',headerId,'Проверка состояния оплаты',
-    {message:'Не удалось проверить оплату. Попробуйте чуть позже.'});
+  await plainError(workspaceAlert,'Не удалось проверить оплату. Попробуйте чуть позже.',{dismissible:true});
+  await workspaceAlert.getByRole('button',{name:'Закрыть ошибку',exact:true}).click();
+  await workspaceAlert.waitFor({state:'hidden'});
   assert.equal(await pay.count(),0);
   const statusResponse=page.waitForResponse(r=>r.url()===app.origin+'/api/payments/status'&&r.request().method()==='POST');
   await check.click();assert.equal((await statusResponse).status(),200);
@@ -188,7 +176,7 @@ try {
   await page.goto(app.origin+'/?document='+disconnected.id);
   await page.route('**/api/payments/checkout', route=>route.abort('failed'));
   await pay.click();await check.waitFor();
-  await support('CLIENT_NETWORK_ERROR',null,'Создание платежа');
+  await plainError(workspaceAlert,networkError,{dismissible:true});
   assert.equal(await pay.count(),0);
   await page.reload();await check.waitFor();assert.equal(await pay.count(),0);
   assert.deepEqual(bankMethods,['Init']);
@@ -200,12 +188,13 @@ try {
     documents:[{id:'fixture',title:{private:secret},kind:'services',stage:'review'}],materials:{}}}));
   await page.goto(app.origin+'/');
   await page.getByRole('heading',{name:'Не удалось отобразить страницу'}).waitFor();
-  await support('UI_EXCEPTION',null,'Работа интерфейса');
+  const renderError='В интерфейсе произошла ошибка. Обновите страницу.';
+  await plainError(page.getByRole('alert').filter({hasText:renderError}),renderError);
   await page.unroute('**/api/workspace');
   await page.getByRole('button',{name:'Попробовать снова'}).click();
   await page.getByRole('heading',{name:'Мои документы'}).waitFor();
 
-  // A real auth link form fails gracefully and excludes its fragment from the clipboard.
+  // A real auth link form shows only the recovery instructions.
   await page.goto(app.origin+'/auth#action=reset&token='+fragmentToken);
   const reset=page.getByRole('button',{name:'Сохранить новый пароль'});
   await reset.waitFor();
@@ -213,7 +202,8 @@ try {
   const failure=page.waitForResponse(r=>r.url()===app.origin+'/api/auth/email'&&r.request().method()==='POST');
   await reset.click();const resetResponse=await failure;
   assert.equal(resetResponse.status(),400);
-  await support('BAD_REQUEST',await serverId(resetResponse),'Смена пароля');
+  await checkServerError(resetResponse,'BAD_REQUEST');
+  await plainError(authAlert,'Ссылка истекла или уже использована. Запросите новую.');
   await page.goto(app.origin+'/auth?logout=1');
   const logoutResponse=page.waitForResponse(r=>r.url()===app.origin+'/api/auth'&&r.request().method()==='POST');
   await page.getByRole('button',{name:'Выйти',exact:true}).click();
@@ -229,7 +219,6 @@ try {
   const embedded=await browser.newPage({serviceWorkers:'block',viewport:{width:1440,height:900}});
   embedded.setDefaultTimeout(8000);
   try {
-    await installClipboard(embedded);
     await embedded.route('**/*',localOnly);
     await embedded.goto(app.origin+'/');
     await embedded.getByRole('button',{name:'Вход / Регистрация',exact:true}).first().click();
@@ -246,17 +235,15 @@ try {
     await embedded.route('**/api/workspace',route=>route.fulfill({status:503,
       headers:{'Content-Type':'application/json','X-Request-ID':headerId},body:JSON.stringify({code:'DB_BUSY'})}),{times:1});
     await again.click();
-    const alert=dialog.getByRole('alert');
-    const report=await support('DB_BUSY',headerId,'Загрузка рабочего пространства',{target:embedded,scope:dialog});
-    assert.ok(!report.includes(recovery));
-    assert.ok((await dialog.locator('code.recovery-code').textContent())===recovery);
-    assert.ok(!(await alert.innerText()).includes(recovery));
+    const alert=dialog.locator('.auth-error[role="alert"]');
+    await plainError(alert,'Сервер не смог выполнить запрос. Попробуйте позже.',{scope:dialog});
+    assert.equal(await dialog.locator('code.recovery-code').textContent(),recovery);
     await again.click();
     await dialog.waitFor({state:'hidden'});
     await embedded.getByRole('button',{name:'Открыть настройки аккаунта',exact:true}).waitFor();
   } finally { await embedded.close(); }
   assert.deepEqual(unexpectedEgress,[]);
-  console.log('Browser checks passed: brief public errors and allowlisted support clipboard, malformed JSON, offline and missing response, login/logout/register/reset and embedded recovery, payment status timeout and uncertain checkout after reload, React error boundary and recovery. All data and providers were synthetic.');
+  console.log('Browser checks passed: plain auth, document and payment errors, server log correlation, malformed JSON, offline and missing response, login/logout/register/reset and embedded recovery, payment status timeout and uncertain checkout after reload, React error boundary and recovery. All data and providers were synthetic.');
 } finally {
   try { await browser.close(); } finally { await app?.dispose(); }
 }

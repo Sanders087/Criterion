@@ -20,14 +20,13 @@ export function signInPath(returnTo:string){
   return path==='/'?'/auth':'/auth?return_to='+encodeURIComponent(path);
 }
 
-const operations = {
-  auth:'Проверка аккаунта', login:'Вход в аккаунт', register:'Регистрация', logout:'Выход из аккаунта',
-  recover:'Восстановление доступа', verify:'Подтверждение email', request_reset:'Запрос восстановления пароля', reset:'Смена пароля',
-  workspace:'Загрузка рабочего пространства', open:'Открытие договора', create:'Создание договора', save:'Сохранение договора',
-  generate:'Составление договора', review:'Проверка договора', revise:'Правка договора', message:'Интервью по договору',
-  export:'Выгрузка договора', checkout:'Создание платежа', payment_status:'Проверка состояния оплаты', ui:'Работа интерфейса',
-} as const;
-export type ClientOperation = keyof typeof operations;
+const operations = [
+  'auth','login','register','logout','recover','verify','request_reset','reset',
+  'workspace','open','create','save','generate','review','revise','message',
+  'export','checkout','payment_status','ui',
+] as const;
+export type ClientOperation = typeof operations[number];
+const knownOperations = new Set<string>(operations);
 export const uncertainPayment = 'Не удалось получить окончательный результат оплаты. Состояние платежа уточняется. Повторно создавать платёж пока не требуется.';
 
 const publicCodes = new Set([
@@ -48,39 +47,50 @@ export class ApiError extends Error {
   readonly code: string;
   readonly requestId?: string;
   readonly operation: ClientOperation;
-  readonly occurredAt = new Date().toISOString();
   constructor(status: number, message: string, code?: unknown, operation: ClientOperation = 'ui', requestId?: unknown) {
     super(message);
     this.status = status;
     this.code = knownCode(code);
     this.requestId = validRequestId(requestId) ? requestId : undefined;
-    this.operation = Object.hasOwn(operations, operation) ? operation : 'ui';
+    this.operation = knownOperations.has(operation) ? operation : 'ui';
   }
 }
 export function asClientError(cause: unknown, operation: ClientOperation): ApiError {
   return cause instanceof ApiError ? cause : new ApiError(0,'В интерфейсе произошла ошибка. Обновите страницу.','UI_EXCEPTION',operation);
 }
-export function supportData(error: ApiError) {
-  // Keep the original human message, URL, form values and stack outside the report.
-  return [
-    'Код ошибки: ' + knownCode(error.code),
-    ...(validRequestId(error.requestId) ? ['Идентификатор запроса: ' + error.requestId] : []),
-    'Время: ' + new Date(error.occurredAt).toISOString(),
-    'Операция: ' + (Object.hasOwn(operations,error.operation) ? operations[error.operation] : operations.ui),
-  ].join('\n');
+const browserErrorCodes = new Set(['CLIENT_OFFLINE','CLIENT_NETWORK_ERROR','CLIENT_RESPONSE_INVALID','UI_EXCEPTION']);
+const loggedErrors = new WeakSet<ApiError>();
+
+// The API logs its own failures. Record browser-only failures once, when the UI displays them.
+export function logClientError(error: ApiError | null): void {
+  if (!error || !browserErrorCodes.has(error.code) || loggedErrors.has(error)) return;
+  loggedErrors.add(error);
+  try {
+    console.warn(JSON.stringify({
+      event: 'client.error',
+      errorCode: error.code,
+      operation: knownOperations.has(error.operation) ? error.operation : 'ui',
+      ...(validRequestId(error.requestId) ? {requestId: error.requestId} : {}),
+    }));
+  } catch { /* A failed console sink must not interrupt the interface. */ }
 }
+
 export async function responseError(response: Response, operation: ClientOperation = 'ui') {
   let data: { error?: unknown; code?: unknown; requestId?: unknown } | null = null;
   try { data = await response.json(); } catch { /* HTTP failures may have a proxy HTML body. */ }
+  const text = typeof data?.error === 'string' ? data.error.trim() : '';
+  const code = knownCode(data?.code ?? text);
   const header = response.headers.get('X-Request-ID');
-  const id = validRequestId(header) ? header : data?.requestId;
-  let message = typeof data?.error === 'string' ? data.error : 'Сервер не смог выполнить запрос. Попробуйте позже.';
+  const bodyId = validRequestId(data?.requestId) ? data.requestId : undefined;
+  const id = validRequestId(header) ? header : bodyId ?? (validRequestId(text) ? text : undefined);
+  const technical = text === data?.code || publicCodes.has(text) || /^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$/.test(text) || validRequestId(text);
+  let message = text && !technical ? text : 'Сервер не смог выполнить запрос. Попробуйте позже.';
   if (response.status === 401 && !['login','recover','verify','reset'].includes(operation))
     message = 'Срок входа истёк. Войдите в аккаунт и повторите действие.';
-  if (operation === 'payment_status' && response.status >= 500 && /^(BANK|GATEWAY)_/.test(knownCode(data?.code)))
+  if (operation === 'payment_status' && response.status >= 500 && /^(BANK|GATEWAY)_/.test(code))
     message = 'Не удалось проверить оплату. Попробуйте чуть позже.';
-  if (data?.code === 'PAYMENT_CHECK_REQUIRED') message = 'Проверьте состояние платежа перед следующей попыткой.';
-  return new ApiError(response.status,message,data?.code,operation,id);
+  if (code === 'PAYMENT_CHECK_REQUIRED') message = 'Проверьте состояние платежа перед следующей попыткой.';
+  return new ApiError(response.status,message,code,operation,id);
 }
 export async function requestResponse(path: string, init: RequestInit, operation: ClientOperation): Promise<Response> {
   let response: Response;
