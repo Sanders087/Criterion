@@ -126,7 +126,8 @@ test('Review protects sections and restores PII in issue details', async () => {
 test('Unavailable analyzer means zero model calls and unchanged document', async () => {
   const doc = document(), before = structuredClone(doc);
   const calls = await withGateway(() => { throw new Error('must not reach model'); }, async () => {
-    await assert.rejects(() => generate(runtime, doc, EMPTY_MATERIALS), PrivacyError);
+    await assert.rejects(() => generate(runtime, doc, EMPTY_MATERIALS),
+      error => error instanceof PrivacyError && error.code === 'PII_HTTP_ERROR' && error.upstreamStatus === 503);
     assert.deepEqual(doc, before);
   }, true);
   assert.equal(calls.providerCalls, 0);
@@ -139,7 +140,9 @@ test('A forged token from the model prevents a generated document from being acc
       ...s, content: '[[CRITERION_PII_foreign_PERSON_1]]',
     })), issues: [],
   }), async () => {
-    await assert.rejects(() => generate(runtime, doc, EMPTY_MATERIALS), PrivacyError);
+    await assert.rejects(() => generate(runtime, doc, EMPTY_MATERIALS), error =>
+      error instanceof PrivacyError && error.code === 'AI_PII_RESTORE_FAILED' &&
+      error.cause instanceof PrivacyError && error.cause.code === 'PII_RESTORE_FAILED');
     assert.deepEqual(doc, before);
   });
   assert.equal(calls.providerCalls, 1);
