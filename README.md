@@ -159,3 +159,7 @@ node tests/container-e2e.mjs
 История до переноса: [RELEASE_NOTES.md](RELEASE_NOTES.md). Старые отчёты в `docs/` описывают Sites и не являются инструкцией к этой ветке.
 
 Справка Amvera: [Docker](https://docs.amvera.ru/applications/configuration/docker.html), [постоянная SQLite](https://docs.amvera.ru/databases/sqlite.html), [дополнительный Git remote](https://docs.amvera.ru/applications/git/secondary-origin.html), [пробы](https://docs.amvera.ru/general/k8sprobe.html).
+
+## Поддержка и эксплуатация
+
+[Диагностика и приёмка релиза](docs/diagnostics.md) · [Ошибки и действия поддержки](docs/troubleshooting.md) · [Метрики и оповещения](docs/monitoring.md) · [Резервное копирование и восстановление](docs/backup-restore.md)
