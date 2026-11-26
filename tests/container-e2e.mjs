@@ -31,8 +31,7 @@ try {
   }
   await ready();
   const rawLogs=docker(['logs',name]);
-  const prefix='Criterion diagnostics v2: ';
-  const events=(rawLogs.stdout+'\n'+rawLogs.stderr).split('\n').filter(line=>line.startsWith(prefix)).map(line=>JSON.parse(line.slice(prefix.length)));
+  const events=(rawLogs.stdout+'\n'+rawLogs.stderr).split('\n').filter(line=>line.startsWith('{')).map(line=>JSON.parse(line));
   assert.ok(events.some(e=>e.event==='storage.entrypoint'&&e.phase==='before_permissions'));
   const storage=events.find(e=>e.event==='storage.snapshot'&&e.phase==='after_open');
   assert.equal(storage.databasePath,'/data/criterion.sqlite');

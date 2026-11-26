@@ -13,8 +13,7 @@ const inspector = fileURLToPath(new URL('../scripts/storage-diagnostics.mjs', im
 function inspect(filename) {
   const result = spawnSync(process.execPath, [inspector], { encoding: 'utf8', windowsHide: true,
     env: { ...process.env, DATABASE_PATH: filename }, timeout: 10000 });
-  const prefix = 'Criterion diagnostics v2: ';
-  const parse = text => text.split('\n').filter(line => line.startsWith(prefix)).map(line => JSON.parse(line.slice(prefix.length)));
+  const parse = text => text.split('\n').filter(line => line.startsWith('{')).map(line => JSON.parse(line));
   const events = parse(result.stdout);
   const errors = parse(result.stderr);
   return { ...result, events: [...events, ...errors] };
@@ -33,16 +32,64 @@ test('Diagnostic metadata remains in one visible text line on stdout and stderr'
   diagnostic('startup.failed', { errorCode: 'EACCES' }, 'error');
   assert.equal(stdout.length, 1);
   assert.equal(stderr.length, 1);
-  const prefix = 'Criterion diagnostics v2: ';
   for (const line of [...stdout, ...stderr]) {
-    assert.ok(line.startsWith(prefix));
     assert.equal(line.split('\n').length, 1);
-    const record = JSON.parse(line.slice(prefix.length));
+    const record = JSON.parse(line);
+    assert.ok(record.message.startsWith('Criterion diagnostics v2: ' + record.event));
     assert.equal(record.service, 'criterion');
+    assert.equal(typeof record.release, 'string');
+    assert.equal(typeof record.instanceId, 'string');
     assert.ok(Number.isFinite(Date.parse(record.timestamp)));
   }
-  assert.equal(JSON.parse(stdout[0].slice(prefix.length)).databasePath, '/data/line\nbreak.sqlite');
-  assert.equal(JSON.parse(stderr[0].slice(prefix.length)).errorCode, 'EACCES');
+  assert.equal(JSON.parse(stdout[0]).databasePath, undefined);
+  assert.equal(JSON.parse(stdout[0]).level, 'info');
+  assert.equal(JSON.parse(stderr[0]).level, 'error');
+  assert.equal(JSON.parse(stderr[0]).errorCode, 'EACCES');
+});
+
+test('Each event accepts only its own fields and known values at every depth', t => {
+  const lines = [];
+  t.mock.method(console, 'log', line => lines.push(line));
+  const secret = 'private-fixture@example.test';
+  const forbidden = { email: secret, token: secret, password: secret, stack: secret, headers: { cookie: secret },
+    passport: secret, contract: secret, prompt: secret, bankSignature: secret, originalMapping: { text: secret } };
+  diagnostic('services.health', { ...forbidden, event: secret, service: secret, level: 'debug', timestamp: secret,
+    release: secret, instanceId: secret, route: secret, requestId: secret, operationId: secret, message: secret,
+    pii: { ...forbidden, status: 'ready', httpStatus: 200 }, site: { status: secret, httpStatus: secret } });
+  diagnostic('http.request_failed', { errorCode: secret, causeCode: secret, stage: secret, durationMs: Infinity,
+    method: secret, upstreamStatus: 900, pii: { status: 'ready' }, retryable: true });
+  diagnostic('storage.snapshot', { directory: { path: secret, mode: secret, ...forbidden }, phase: secret,
+    mount: { filesystem: secret, mountPoint: secret, persistenceVerified: true } });
+  diagnostic('DATABASE ' + secret, {});
+  assert.equal(lines.length, 3);
+  assert.doesNotMatch(lines.join(''), /private-fixture/);
+  const [health, failed, storage] = lines.map(line => JSON.parse(line));
+  assert.deepEqual(health.pii, { status: 'ready', httpStatus: 200 });
+  assert.equal(health.site, undefined);
+  assert.equal(failed.pii, undefined);
+  assert.equal(failed.upstreamStatus, undefined);
+  assert.equal(failed.retryable, true);
+  assert.equal(storage.mount, undefined);
+});
+
+test('Log threshold, invalid inputs and failing writers cannot affect the caller', t => {
+  const previous = process.env.LOG_LEVEL;
+  t.after(() => { if (previous === undefined) delete process.env.LOG_LEVEL; else process.env.LOG_LEVEL = previous; });
+  delete process.env.LOG_LEVEL;
+  const calls = [];
+  t.mock.method(console, 'log', line => calls.push(line));
+  t.mock.method(console, 'error', () => { throw Error('sink unavailable'); });
+  diagnostic('site.starting', {}, 'debug');
+  assert.equal(calls.length, 0);
+  process.env.LOG_LEVEL = 'debug';
+  diagnostic('site.starting', {}, 'debug');
+  assert.equal(JSON.parse(calls[0]).level, 'debug');
+  process.env.LOG_LEVEL = 'warn';
+  diagnostic('site.starting', {});
+  assert.equal(calls.length, 1);
+  assert.doesNotThrow(() => diagnostic('startup.failed', {}, 'error'));
+  const hostile = new Proxy({}, { getPrototypeOf() { throw Error('unsafe object'); } });
+  assert.doesNotThrow(() => diagnostic('startup.failed', hostile, 'error'));
 });
 
 test('Mount inspection distinguishes container root, dedicated volume and unknown metadata', () => {
@@ -90,8 +137,7 @@ test('Configured external services are not reported as tested, and credential va
   integrationConfiguration({ OPENAI_API_KEY: 'secret-model-value', RESEND_API_KEY: 'secret-mail-value',
     EMAIL_FROM: 'private-fixture@example.test', TBANK_ENABLED: 'true', TBANK_TERMINAL_KEY: 'secret-terminal-value',
     TBANK_PASSWORD_BASE64: 'secret-bank-value' });
-  assert.ok(lines[0].startsWith('Criterion diagnostics v2: '));
-  const data = JSON.parse(lines[0].slice('Criterion diagnostics v2: '.length));
+  const data = JSON.parse(lines[0]);
   assert.equal(data.providerAvailability, 'not_checked');
   assert.equal(data.modelKeyConfigured, true);
   assert.equal(data.mailConfigured, true);
