@@ -36,6 +36,9 @@ test('Diagnostic metadata remains in one visible text line on stdout and stderr'
     assert.equal(line.split('\n').length, 1);
     const record = JSON.parse(line);
     assert.ok(record.message.startsWith('Criterion diagnostics v2: ' + record.event));
+    for (const key of ['level','service','release','instanceId']) {
+      assert.ok(record.message.split(' ').includes(key + '=' + record[key]));
+    }
     assert.equal(record.service, 'criterion');
     assert.equal(typeof record.release, 'string');
     assert.equal(typeof record.instanceId, 'string');

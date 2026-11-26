@@ -44,9 +44,16 @@ def event(name, *, phase, database=None, directory=None, errno=None):
         else:
             return
         stamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-        line = {"timestamp": stamp, "level": level, "service": log_tag("SERVICE_NAME", "criterion"),
-                "release": log_tag("APP_RELEASE", "unknown"), "instanceId": log_tag("INSTANCE_ID", "unknown"),
-                "event": name, "message": f"Criterion diagnostics v2: {name} phase={phase}", **detail}
+        identity = {"level": level, "service": log_tag("SERVICE_NAME", "criterion"),
+                    "release": log_tag("APP_RELEASE", "unknown"), "instanceId": log_tag("INSTANCE_ID", "unknown")}
+        # Some log viewers render just message. Use the same validated metadata as the JSON fields.
+        parts = [f"Criterion diagnostics v2: {name}"]
+        for key, value in {**identity, **detail}.items():
+            if isinstance(value, dict):
+                parts.extend(f"{key}.{field}={item}" for field, item in value.items() if item is not None)
+            elif value is not None:
+                parts.append(f"{key}={value}")
+        line = {"timestamp": stamp, **identity, "event": name, "message": " ".join(parts), **detail}
         print(json.dumps(line), flush=True, file=sys.stderr if level == "error" else sys.stdout)
     except Exception:
         # A missing log sink must not block startup or conceal the original failure.

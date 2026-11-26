@@ -33,7 +33,20 @@ try {
   await ready();
   const rawLogs=docker(['logs',name]);
   const events=(rawLogs.stdout+'\n'+rawLogs.stderr).split('\n').filter(line=>line.startsWith('{')).map(line=>JSON.parse(line));
-  assert.ok(events.some(e=>e.event==='storage.entrypoint'&&e.phase==='before_permissions'));
+  const bootstrap = events.find(e => e.event === 'storage.entrypoint' && e.phase === 'before_permissions');
+  assert.ok(bootstrap);
+  for (const expected of ['level=info', 'service=criterion', 'databasePath=/data/criterion.sqlite',
+    'directory.uid=' + bootstrap.directory.uid, 'directory.mode=' + bootstrap.directory.mode]) {
+    assert.ok(bootstrap.message.split(' ').includes(expected));
+  }
+  // A startup that fails before Node runs must still expose a safe OS error number in the viewer.
+  const failed = docker(['run', '--rm', '--network', 'none', '--read-only', '--tmpfs', '/data', image, '/missing-test-command'], false);
+  assert.equal(failed.status, 1);
+  const failure = failed.stderr.split('\n').filter(line => line.startsWith('{')).map(line => JSON.parse(line))
+    .find(e => e.event === 'entrypoint.failed');
+  assert.equal(failure.errno, 2);
+  assert.ok(failure.message.includes('errno=2'));
+  assert.doesNotMatch(failure.message, /missing-test-command/);
   const storage=events.find(e=>e.event==='storage.snapshot'&&e.phase==='after_open');
   assert.equal(storage.databasePath,'/data/criterion.sqlite');
   assert.equal(storage.mount.mountPoint,'/data');assert.equal(storage.mount.separateMount,true);
