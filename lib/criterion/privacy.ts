@@ -1,3 +1,4 @@
+import { AppError } from './app-error.ts';
 /**
  * Request-scoped, reversible pseudonymization. Only the trusted detector sees
  * source text. The vault is kept in this closure, never sent to the LLM.
@@ -45,9 +46,10 @@ const hasReservedMarker = (text: string) =>
   text.replace(/[\s_\-\u200B-\u200D\uFEFF]/g, '').toUpperCase().includes('CRITERIONPII');
 const own = (obj: object, key: string) => Object.prototype.hasOwnProperty.call(obj, key);
 
-export class PrivacyError extends Error {
-  constructor() {
-    super('Обработка ПДн не завершена. Операция остановлена; результат не сохранён.');
+export class PrivacyError extends AppError {
+  constructor(cause?: unknown) {
+    super({ code: 'PRIVACY_ERROR', status: 500, publicMessage: 'Обработка ПДн не завершена. Операция остановлена; результат не сохранён.',
+      service: 'privacy', stage: 'privacy', retryable: false, cause });
     this.name = 'PrivacyError';
   }
 }
@@ -134,8 +136,9 @@ export async function protectRequest(
   try {
     // A detector cannot change the texts which we later redact.
     detection = await detect(Object.freeze([...texts]));
-  } catch {
-    throw new PrivacyError();
+  } catch (cause) {
+    if (cause instanceof PrivacyError) throw cause;
+    throw new PrivacyError(cause);
   }
   if (!detection || detection.profile !== 'ru-contract-v1' ||
       detection.offsetUnit !== 'utf16' || !Array.isArray(detection.spans) ||
