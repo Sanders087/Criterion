@@ -85,6 +85,12 @@ test('Log threshold, invalid inputs and failing writers cannot affect the caller
   diagnostic('site.starting', {}, 'debug');
   assert.equal(calls.length, 0);
   process.env.LOG_LEVEL = 'debug';
+  const previousUntil = process.env.LOG_DEBUG_UNTIL;
+  t.after(() => { if (previousUntil) process.env.LOG_DEBUG_UNTIL = previousUntil; else delete process.env.LOG_DEBUG_UNTIL; });
+  process.env.LOG_DEBUG_UNTIL = new Date(Date.now()-1000).toISOString();
+  diagnostic('site.starting', {}, 'debug');
+  assert.equal(calls.length,0);
+  process.env.LOG_DEBUG_UNTIL = new Date(Date.now()+60000).toISOString();
   diagnostic('site.starting', {}, 'debug');
   assert.equal(JSON.parse(calls[0]).level, 'debug');
   process.env.LOG_LEVEL = 'warn';
