@@ -2,7 +2,7 @@ import type { Contract } from './domain.ts';
 
 export const CONTRACT_PRICE = 19900;
 export const INCLUDED_AI_OPERATIONS = 2;
-export type Billing = {state:string; locked:boolean; price:number; aiRemaining:number|null};
+export type Billing = {state:string; locked:boolean; price:number; aiRemaining:number|null; checkRequired?:boolean};
 export type BillingRow = {body:string; revision:number; billingState:string; aiOperationsUsed:number};
 export function hasAccess(state:string){return state==='paid'||state==='legacy'}
 export function presentContract(row:BillingRow):Contract {

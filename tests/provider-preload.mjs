@@ -6,7 +6,8 @@ process.on('message', message => {
   const call = pending.get(message.id);
   if (!call) return;
   pending.delete(message.id); clearTimeout(call.timer);
-  if (message.error) call.reject(new Error(message.error));
+  if (message.timeout) call.reject(new DOMException('Test provider deadline', 'TimeoutError'));
+  else if (message.error) call.reject(new Error(message.error));
   else call.resolve(new Response(message.body, { status: message.status, headers: message.headers }));
 });
 globalThis.fetch = async (input, init) => {

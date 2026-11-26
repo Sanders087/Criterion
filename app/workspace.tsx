@@ -42,6 +42,10 @@ export default function Workspace(){
     // Notifications usually unlock immediately. Periodically reconcile with the bank
     // as well, so a delayed/lost notification cannot strand a paid customer.
     const next=++checks%4===0?(await api<{document:Contract}>('/api/payments/status','POST',{documentId:id})).document:await api(`/api/documents/${id}`);
+    if(!stopped&&next.id===id&&next.billing?.locked){
+     setDoc(current=>current?.id===id&&current.billing&&Boolean(current.billing.checkRequired)!==Boolean(next.billing?.checkRequired)
+       ? {...current,billing:{...current.billing,checkRequired:next.billing?.checkRequired}} : current);
+    }
     if(!stopped&&next.id===id&&next.billing?.state==='paid'&&!next.billing.locked){sync(next);setPaymentNotice('Оплата подтверждена. Договор открыт.');void load().catch(()=>{})}
    }catch{/* A transient outage must not erase the saved draft or stop later checks. */}
    finally{inFlight=false}
@@ -66,7 +70,12 @@ export default function Workspace(){
  const currentSections=previewVersion?doc?.versions.find(v=>v.number===previewVersion)?.sections:doc?.sections;
  const docDirty=!saved||edit||previewVersion!==null;
  async function checkPayment(id=doc?.id){if(!id||id==='example')return;await run('Проверяем оплату',async()=>{const result=await api<{document:Contract;status:string}>('/api/payments/status','POST',{documentId:id});sync(result.document);setPaymentNotice(result.document.billing?.state==='paid'?'Оплата подтверждена. Договор открыт.':result.status==='REFUNDED'?'Оплата возвращена.':result.status==='NOT_STARTED'?'Оплата ещё не начата.':['REJECTED','CANCELED','DEADLINE_EXPIRED','AUTH_FAIL','INIT_FAILED','REVERSED'].includes(result.status)?'Оплата не завершена. Можно повторить попытку.':'Ожидаем подтверждение банка. Договор откроется автоматически после оплаты.');await load()})}
- async function pay(receiptEmail:string){if(!doc)return;await run('Открываем страницу Т-Банка',async()=>{const result=await api<{document:Contract;paymentUrl:string|null}>('/api/payments/checkout','POST',{documentId:doc.id,receiptEmail});sync(result.document);if(result.paymentUrl)window.location.assign(result.paymentUrl);else setPaymentNotice('Оплата подтверждена. Договор открыт.')})}
+ async function pay(receiptEmail:string){if(!doc||doc.billing?.checkRequired)return;await run('Открываем страницу Т-Банка',async()=>{const result=await api<{document:Contract;paymentUrl:string|null}>('/api/payments/checkout','POST',{documentId:doc.id,receiptEmail}).catch(cause=>{
+  if(cause instanceof ApiError && cause.code==='PAYMENT_CHECK_REQUIRED'){
+   setDoc(current=>current?.id===doc.id && current.billing ? {...current,billing:{...current.billing,checkRequired:true}} : current);
+  }
+  throw cause;
+ });sync(result.document);if(result.paymentUrl)window.location.assign(result.paymentUrl);else setPaymentNotice('Оплата подтверждена. Договор открыт.')})}
  async function exportDoc(format:'docx'|'txt'){if(!doc||locked)return;if(demo){download(doc,format);return}await run('Готовим файл',async()=>{const response=await fetch(`/api/documents/${doc.id}/export?format=${format}`,{cache:'no-store'});if(!response.ok)throw await responseError(response);downloadBlob(await response.blob(),`${doc.title}.${format}`)})}
  return <div className="shell">
  <aside className={`sidebar ${mobile?'show':''}`}>
