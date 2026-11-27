@@ -128,7 +128,7 @@ export function createGateway(config, forward = bankTransport(), now = () => Dat
       let payload; try { payload = JSON.parse(body); } catch { send(400, { error: 'Invalid JSON' }); return; }
       if (!payload || typeof payload !== 'object' || Array.isArray(payload) || payload.TerminalKey !== config.terminal ||
           typeof payload.Token !== 'string' || !/^[a-f0-9]{64}$/i.test(payload.Token) || Object.hasOwn(payload, 'Password') ||
-          (method === 'Init' && payload.Amount !== 19900)) { send(400, { error: 'Invalid payment' }); return; }
+          (method === 'Init' && ![19900,99900,399900].includes(payload.Amount))) { send(400, { error: 'Invalid payment' }); return; }
       seen.set(nonce, now() + WINDOW_SECONDS * 2000);
       send(200, await forward(method, body));
     } catch {

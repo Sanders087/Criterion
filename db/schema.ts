@@ -1,6 +1,7 @@
-import { sqliteTable, text, integer, index, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, index, uniqueIndex, blob } from 'drizzle-orm/sqlite-core';
 export const documents = sqliteTable('documents', {
   id: text('id').primaryKey(), owner: text('owner').notNull(), title: text('title').notNull(), kind: text('kind').notNull(), stage: text('stage').notNull(), body: text('body').notNull(), revision: integer('revision').notNull().default(0), lockToken: text('lock_token'), lockUntil: integer('lock_until'), createdAt: text('created_at').notNull(), updatedAt: text('updated_at').notNull(),
+  selectedPackage: text('selected_package'),
   billingState: text('billing_state').notNull().default('legacy'), aiOperationsUsed: integer('ai_operations_used').notNull().default(0),
 }, t => [index('documents_owner_updated').on(t.owner,t.updatedAt)]);
 export const materials = sqliteTable('materials', {owner: text('owner').primaryKey(), body: text('body').notNull(), updatedAt: text('updated_at').notNull()});
@@ -16,7 +17,9 @@ export const paymentOrders = sqliteTable('payment_orders', {
   paymentId: text('payment_id'), paymentUrl: text('payment_url'), status: text('status').notNull(),
   statusRank: integer('status_rank').notNull().default(0), createdAt: integer('created_at').notNull(), updatedAt: integer('updated_at').notNull(),
   checkedAt: integer('checked_at').notNull().default(0),
+  packageSnapshot:text('package_snapshot').notNull().default('{"id":"contract","name":"Договор","amount":19900,"signature":false,"video":false,"consultationMinutes":0,"contents":["Договор под вашу ситуацию"],"terms":["Договор доступен после подтверждения оплаты банком."]}'), signatureFile:blob('signature_file',{mode:'buffer'}), videoUrl:text('video_url'), consultationAt:text('consultation_at'), consultationTimezone:text('consultation_timezone'), meetingUrl:text('meeting_url'), consultationStatus:text('consultation_status').notNull().default('pending'), fulfillmentRevision:integer('fulfillment_revision').notNull().default(0),
 }, t => [uniqueIndex('payment_orders_active_document').on(t.activeDocument), uniqueIndex('payment_orders_payment_id').on(t.paymentId), index('payment_orders_document').on(t.documentId)]);
 export const paymentEvents = sqliteTable('payment_events', {
   id: text('id').primaryKey(), orderId: text('order_id').notNull(), status: text('status').notNull(), amount: integer('amount').notNull(), createdAt: integer('created_at').notNull(),
 }, t => [uniqueIndex('payment_events_once').on(t.orderId,t.status,t.amount)]);
+export const orderServiceEvents = sqliteTable('order_service_events', {id:text('id').primaryKey(),orderId:text('order_id').notNull(),actor:text('actor').notNull(),action:text('action').notNull(),createdAt:integer('created_at').notNull()},t=>[index('order_service_events_order').on(t.orderId)]);

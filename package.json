@@ -1,6 +1,6 @@
 {
   "name": "criterion",
-  "version": "1.15.0",
+  "version": "1.16.0",
   "private": true,
   "engines": {
     "node": ">=24.0.0"
@@ -14,7 +14,7 @@
     "db:generate": "drizzle-kit generate",
     "start:container": "node scripts/run-with-pii.mjs -- node scripts/start-site.mjs",
     "test": "node --experimental-strip-types --test tests/*.test.ts tests/*.test.mjs services/tbank-gateway/server.test.mjs",
-    "test:integration": "node tests/integration.mjs && node tests/auth-integration.mjs && node tests/email-integration.mjs && node tests/payments-integration.mjs"
+    "test:integration": "node tests/integration.mjs && node tests/auth-integration.mjs && node tests/email-integration.mjs && node tests/payments-integration.mjs && node --experimental-strip-types tests/packages-integration.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

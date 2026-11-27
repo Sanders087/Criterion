@@ -1,5 +1,5 @@
 import { Buffer } from 'node:buffer';
-import { CONTRACT_PRICE } from './billing.ts';
+import {packageById,type PackageId} from './packages.ts';
 
 export type TBankEnv = {
   TBANK_ENABLED?:string; TBANK_TERMINAL_KEY?:string; TBANK_PASSWORD?:string; TBANK_PASSWORD_BASE64?:string;
@@ -98,15 +98,16 @@ export async function bankRequest(env:TBankEnv,method:'Init'|'GetState'|'CheckOr
   if(!data||typeof data!=='object'||Array.isArray(data))throw new PaymentError(502,'Не удалось прочитать ответ банка.');
   return data;
 }
-export function initParameters(env:TBankEnv,orderId:string,documentId:string,email:string):BankData {
+export function initParameters(env:TBankEnv,orderId:string,documentId:string,email:string,packageId:PackageId='contract'):BankData {
+  const p=packageById(packageId);if(!p)throw new PaymentError(400,'Выберите пакет.');
   const {origin,notificationUrl}=checkoutConfig(env);const query='?document='+encodeURIComponent(documentId);
-  const result:BankData={Amount:CONTRACT_PRICE,OrderId:orderId,Description:'Создание договора на основе системы Критерион',PayType:'O',Language:'ru',
+  const result:BankData={Amount:p.amount,OrderId:orderId,Description:p.name,PayType:'O',Language:'ru',
     SuccessURL:origin+'/'+query+'&payment=success',FailURL:origin+'/'+query+'&payment=fail',
     NotificationURL:notificationUrl,DATA:{OperationInitiatorType:'0'}};
   if(env.TBANK_RECEIPT_MODE==='bank'){
     if(email.length>64||!/^\S+@[^\s@]+\.[^\s@]+$/.test(email))throw new PaymentError(400,'Укажите email для чека длиной не более 64 символов.');
     if(env.TBANK_MODE==='live'&&/@(?:[^@]+\.)?(?:example\.(?:com|net|org)|invalid|test|localhost)$/i.test(email))throw new PaymentError(400,'Укажите действующий email для чека.');
-    result.Receipt={Email:email,Taxation:env.TBANK_TAXATION,Items:[{Name:'Создание договора на основе системы Критерион',Price:CONTRACT_PRICE,Quantity:1,Amount:CONTRACT_PRICE,Tax:env.TBANK_TAX,PaymentMethod:env.TBANK_PAYMENT_METHOD,PaymentObject:env.TBANK_PAYMENT_OBJECT}]};
+    result.Receipt={Email:email,Taxation:env.TBANK_TAXATION,Items:[{Name:p.name,Price:p.amount,Quantity:1,Amount:p.amount,Tax:env.TBANK_TAX,PaymentMethod:env.TBANK_PAYMENT_METHOD,PaymentObject:env.TBANK_PAYMENT_OBJECT}]};
   }
   return result;
 }

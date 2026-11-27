@@ -32,6 +32,7 @@ fetchMock.get('https://api.openai.com').intercept({path:'/v1/chat/completions',m
 }).persist();
 const mf=await createTestApp({bindings:{PII_ANALYZER_URL:'https://pii.test/analyze',PII_ANALYZER_TOKEN:piiToken,OPENAI_API_KEY:'fixture-only',TBANK_ENABLED:'true',TBANK_TERMINAL_KEY:terminal,TBANK_PASSWORD_BASE64:Buffer.from(password,'utf8').toString('base64'),TBANK_PUBLIC_URL:'https://criterion.test',TBANK_RECEIPT_MODE:'bank',TBANK_TAXATION:'usn_income',TBANK_TAX:'none',TBANK_PAYMENT_METHOD:'full_payment',TBANK_PAYMENT_OBJECT:'intellectual_activity'},fetchMock});
 async function request(path,method='GET',body,status=200,headers={}){
+  if(path==='/api/payments/checkout')body={packageId:'contract',...body};
   const response=await mf.dispatchFetch('https://criterion.test'+path,{method,headers:{cookie,Origin:'https://criterion.test',...(body?{'content-type':'application/json'}:{}),...headers},body:body?JSON.stringify(body):undefined});
   const data=await response.json();assert.equal(response.status,status,JSON.stringify(data));checks++;return data;
 }
@@ -53,8 +54,9 @@ try{
   await request('/api/payments/checkout','POST',{documentId:doc.id,amount:1},400);
   await request('/api/payments/checkout','POST',{documentId:doc.id},403,{Origin:'https://evil.test'});
   await request('/api/payments/checkout','POST',{documentId:doc.id,receiptEmail:'invalid'},400);
+  await request('/api/payments/package','POST',{documentId:doc.id,packageId:'contract',acknowledge:true});
   const before=initCount;
-  const attempts=await Promise.all([0,1].map(()=>mf.dispatchFetch('https://criterion.test/api/payments/checkout',{method:'POST',headers:{cookie,Origin:'https://criterion.test','content-type':'application/json'},body:JSON.stringify({documentId:doc.id,receiptEmail:"receipt@example.test"})})));
+  const attempts=await Promise.all([0,1].map(()=>mf.dispatchFetch('https://criterion.test/api/payments/checkout',{method:'POST',headers:{cookie,Origin:'https://criterion.test','content-type':'application/json'},body:JSON.stringify({documentId:doc.id,packageId:"contract",receiptEmail:"receipt@example.test"})})));
   assert.ok(attempts.every(r=>[200,409].includes(r.status)));assert.ok(attempts.some(r=>r.status===200));assert.equal(initCount,before+1);assert.equal(receiptEmails.at(-1),"receipt@example.test");const initialized=await attempts.find(r=>r.status===200).json();assert.match(initialized.paymentUrl,/securepay/);checks++;
   const payment=[...bankPayments.values()].find(p=>p.OrderId===initialized.paymentUrl.split('/').at(-1));assert.ok(payment);
   await request(path,'PATCH',{action:'delete',revision:doc.revision},409);
@@ -83,19 +85,19 @@ try{
   await notification(payment,{Status:'REFUNDED'});await notification(payment,{Status:'CONFIRMED'});doc=await request(path);assert.equal(doc.billing.state,'refunded');assert.equal(doc.billing.aiRemaining,0);assert.ok(!JSON.stringify(doc).includes('PRIVATE-'));
   await request(path+'/export?format=docx','GET',undefined,402);await request('/api/payments/checkout','POST',{documentId:doc.id},409);
   // A lost Init response is reconciled by its immutable OrderId, without another Init.
-  let second=await request('/api/documents','POST',{kind:'services',mode:'ai'},201);second=await request('/api/documents/'+second.id,'PATCH',{action:'generate',revision:0});lostInit=true;const beforeLost=initCount;
+  let second=await request('/api/documents','POST',{kind:'services',mode:'ai'},201);second=await request('/api/documents/'+second.id,'PATCH',{action:'generate',revision:0});await request('/api/payments/package','POST',{documentId:second.id,packageId:'contract',acknowledge:true});lostInit=true;const beforeLost=initCount;
   await request('/api/payments/checkout','POST',{documentId:second.id},502);lostInit=false;
   const lost=[...bankPayments.values()].at(-1);lost.Status='CONFIRMED';await db.prepare('UPDATE payment_orders SET created_at=?,checked_at=0 WHERE id=?').bind(Date.now()-60000,lost.OrderId).run();
   const recovered=await request('/api/payments/status','POST',{documentId:second.id});assert.equal(recovered.document.billing.state,'paid');assert.equal(initCount,beforeLost+1);checks++;
   // An unshown NEW link is safely cancelled before retry; charged payments are never auto-refunded.
-  let third=await request('/api/documents','POST',{kind:'services',mode:'ai'},201);third=await request('/api/documents/'+third.id,'PATCH',{action:'generate',revision:0});lostInit=true;
+  let third=await request('/api/documents','POST',{kind:'services',mode:'ai'},201);third=await request('/api/documents/'+third.id,'PATCH',{action:'generate',revision:0});await request('/api/payments/package','POST',{documentId:third.id,packageId:'contract',acknowledge:true});lostInit=true;
   await request('/api/payments/checkout','POST',{documentId:third.id},502);lostInit=false;
   const orphan=[...bankPayments.values()].at(-1);await db.prepare('UPDATE payment_orders SET created_at=?,checked_at=0 WHERE id=?').bind(Date.now()-60000,orphan.OrderId).run();
   const canceled=await request('/api/payments/status','POST',{documentId:third.id});assert.equal(canceled.status,'CANCELED');assert.equal(canceled.document.billing.state,'unpaid');
   const retry=await request('/api/payments/checkout','POST',{documentId:third.id});assert.ok(retry.paymentUrl);assert.notEqual(retry.paymentUrl,orphan.PaymentURL);
   // A request that never reached the bank may recover only after an explicit 335,
   // beyond the grace period. A generic failure must not create a second payment.
-  let fourth=await request('/api/documents','POST',{kind:'services',mode:'ai'},201);fourth=await request('/api/documents/'+fourth.id,'PATCH',{action:'generate',revision:0});unreceivedInit=true;
+  let fourth=await request('/api/documents','POST',{kind:'services',mode:'ai'},201);fourth=await request('/api/documents/'+fourth.id,'PATCH',{action:'generate',revision:0});await request('/api/payments/package','POST',{documentId:fourth.id,packageId:'contract',acknowledge:true});unreceivedInit=true;
   await request('/api/payments/checkout','POST',{documentId:fourth.id},502);unreceivedInit=false;
   const missing=await db.prepare('SELECT id FROM payment_orders WHERE document_id=?').bind(fourth.id).first();
   await db.prepare('UPDATE payment_orders SET created_at=?,checked_at=0 WHERE id=?').bind(Date.now()-60000,missing.id).run();
